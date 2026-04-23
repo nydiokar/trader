@@ -1,0 +1,18 @@
+# Environment
+.env
+.env.*
+!.env.example
+
+# SQLite DB and data directory
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# Build output
+dist/
+node_modules/
+
+# Misc
+*.bak
+.DS_Store
