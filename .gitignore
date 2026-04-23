@@ -3,6 +3,9 @@
 .env.*
 !.env.example
 
+# Prisma generated client
+/generated/
+
 # SQLite DB and data directory
 data/
 *.db
@@ -16,3 +19,5 @@ node_modules/
 # Misc
 *.bak
 .DS_Store
+
+/generated/prisma

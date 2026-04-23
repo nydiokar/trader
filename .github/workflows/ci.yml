@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate Prisma client
+        run: pnpm prisma generate
+
+      - name: Typecheck
+        run: pnpm build
+
+      - name: Test
+        run: pnpm test
+        env:
+          WALLET_PRIVATE_KEY_BASE58: ${{ secrets.WALLET_PRIVATE_KEY_BASE58 || 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' }}
+          HELIUS_RPC_URL: https://mainnet.helius-rpc.com/?api-key=ci-placeholder
+          WEBHOOK_SECRET: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          DATABASE_URL: file:./data/test.db

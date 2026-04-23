@@ -1,6 +1,6 @@
 # Trader Bot — Project Context
 
-**Branch:** `main` | **Last Updated:** 2026-04-23 | **Status:** Pre-scaffold. Spec locked. M0 not started.
+**Branch:** `main` | **Last Updated:** 2026-04-23 | **Status:** M0 complete. M1 (webhook ingress) is next.
 
 ---
 
@@ -28,10 +28,10 @@ Canonical spec: `solana-signal-bot-spec-v2.md` (repo root)
 |:------|:-------|
 | Language | Node.js 20+ / TypeScript strict |
 | Web framework | Fastify |
-| Database | SQLite via `better-sqlite3` |
-| Schema validation | Zod |
-| Logger | Pino (JSON, with redaction) |
-| Solana SDK | `@solana/web3.js` + `@solana/spl-token` |
+| Database | SQLite via Prisma 7 + `@prisma/adapter-better-sqlite3` |
+| Schema validation | Zod 4 |
+| Logger | Pino 10 (JSON, with redaction) |
+| Solana SDK | `@solana/kit` (web3.js v2 is now @solana/kit) + `@solana/spl-token` |
 | Jupiter | `@jup-ag/api` v6, `/swap-instructions` only |
 | Jito | Raw HTTPS to Block Engine |
 | Hosting | Local / self-hosted by default. Fly.io, Railway, VPS all viable. No platform lock-in. |
@@ -44,7 +44,7 @@ Canonical spec: `solana-signal-bot-spec-v2.md` (repo root)
 
 | ID | Name | Estimate | Status | Acceptance Gate |
 |:--:|:-----|:--------:|:------:|:----------------|
-| M0 | Scaffold | 0.5 day | **Not started** | Server starts locally, `/healthz` 200, SQLite DB created at `DB_PATH`, persists across restart |
+| M0 | Scaffold | 0.5 day | **Done** | Server starts locally, `/healthz` 200, SQLite DB created at `DB_PATH`, persists across restart |
 | M1 | Webhook ingress | 1 day | **Not started** | HMAC auth, nonce, idempotency SM, rate-limit — 100% of spec tests pass |
 | M2 | Jupiter quote integration | 0.5 day | **Not started** | Quotes for 5 mints end-to-end; mock + live tests pass |
 | M3 | Devnet full swap | 1 day | **Not started** | ≥ 28/30 devnet swaps land |
@@ -61,18 +61,31 @@ Canonical spec: `solana-signal-bot-spec-v2.md` (repo root)
 
 ## Active Work
 
-### Current Priority: M0 — Scaffold
+### Current Priority: M1 — Webhook Ingress
 
-Nothing exists yet. The first task is to initialize the project so all subsequent milestones have a runnable base.
+M0 is complete. The full idempotency state machine, nonce table, and all M1 test cases from the spec need to be implemented.
 
-M0 checklist:
-- [ ] `pnpm init` + `tsconfig.json` (strict mode)
-- [ ] Fastify + Pino + Zod + Vitest installed
-- [ ] `src/` module layout as per spec §1.1
-- [ ] `Dockerfile` (multi-stage, non-root user) — optional at M0, not blocking
-- [ ] `data/` directory gitignored; `DB_PATH` defaults to `./data/bot.db`
-- [ ] GitHub Actions CI: lint + typecheck + test on PR
-- [ ] `.env.example` with all vars from spec §6.1
+M1 spec tests (all must pass):
+- [ ] Valid signed request → 200
+- [ ] Invalid signature → 401
+- [ ] Expired timestamp → 403
+- [ ] Duplicate nonce → 409
+- [ ] Same signal_id resent after completion → 200 with stored result
+- [ ] Same signal_id resent mid-flight → 202
+- [ ] Concurrent identical signal_ids (10 parallel) → exactly one enters executor
+- [ ] Rate limit: 61st request/min → 429
+
+### Completed: M0 — Scaffold ✓
+
+- [x] `pnpm init` + `tsconfig.json` (strict mode)
+- [x] Fastify 5 + Pino 10 + Zod 4 + Vitest 4.1.5 installed
+- [x] `src/` module layout per spec §1.1
+- [x] Prisma 7 with SQLite, `prisma.config.ts`, initial migration, generated client
+- [x] `data/` gitignored; `DATABASE_URL` defaults to `file:./data/bot.db`
+- [x] GitHub Actions CI: typecheck + test on push/PR
+- [x] `.env.example` with all vars from spec §6.1
+- [x] `/healthz` returning `{ ok, db, rpc, wallet_sol, kill_switch }`
+- [x] `/metrics` stub wired with all required prom-client gauges/counters/histograms
 - [ ] `GET /healthz` returning `{ ok, db, rpc, wallet_sol, kill_switch }`
 
 ---
@@ -92,11 +105,11 @@ M0 checklist:
 
 ## Current Operating Reality
 
-- Repo exists with spec only. No code yet.
-- The spec file `solana-signal-bot-spec-v2.md` is the single canonical source of truth.
-- Upstream signal producer is the `tokens_ingest` repo (separate project).
-- Default run target is local. SQLite stored at `./data/bot.db` (gitignored). No hosting platform required to develop or run M0–M7.
-- Deployment target is undecided — Fly.io, Railway, and a self-hosted VPS are all valid options for M8 canary onward. Choose at that point based on cost and ops preference.
+- M0 scaffold is live. Server starts with `pnpm dev`, `/healthz` returns 200, DB created at `./data/bot.db`.
+- `@solana/web3.js` v2 was renamed to `@solana/kit` — project uses `@solana/kit`. Noted in spec Appendix C.
+- Prisma 7 generates client to `generated/prisma/client.ts` (not `@prisma/client` directly) — import path in `src/db/index.ts` reflects this.
+- `LOG_LEVEL` env var is coerced to lowercase so `INFO` and `info` both work.
+- Deployment target is undecided — Fly.io, Railway, and a self-hosted VPS are all valid options for M8 canary onward.
 
 ---
 

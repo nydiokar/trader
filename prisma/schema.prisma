@@ -1,0 +1,71 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+// Spec §2.4 — idempotency state machine
+model Signal {
+  signalId    String   @id @map("signal_id")
+  receivedAt  Int      @map("received_at")
+  rawPayload  String   @map("raw_payload")
+  state       String   // received | in_flight | done | failed | rejected
+  decision    String?
+  resultJson  String?  @map("result_json")
+  completedAt Int?     @map("completed_at")
+
+  trade Trade?
+
+  @@map("signals")
+}
+
+// Spec §2.5 — nonce replay protection
+model Nonce {
+  nonce  String @id
+  seenAt Int    @map("seen_at")
+
+  @@index([seenAt], name: "idx_nonces_seen_at")
+  @@map("nonces")
+}
+
+// Spec §3 — trade execution results
+model Trade {
+  id              Int     @id @default(autoincrement())
+  signalId        String  @unique @map("signal_id")
+  tokenMint       String  @map("token_mint")
+  amountSolIn     Float   @map("amount_sol_in")
+  amountOutActual Float?  @map("amount_out_actual")
+  signature       String?
+  state           String  // confirmed | failed_onchain | expired | uncertain
+  submittedVia    String? @map("submitted_via") // jito | rpc
+  dryRun          Boolean @default(false) @map("dry_run")
+  slippageActual  Float?  @map("slippage_actual")
+  createdAt       Int     @map("created_at")
+  confirmedAt     Int?    @map("confirmed_at")
+  errorMsg        String? @map("error_msg")
+
+  signal Signal @relation(fields: [signalId], references: [signalId])
+
+  @@map("trades")
+}
+
+// Spec §4.1 — per-token blocklist
+model Blocklist {
+  tokenMint String @id @map("token_mint")
+  addedAt   Int    @map("added_at")
+  reason    String?
+
+  @@map("blocklist")
+}
+
+// Spec §4.1 — kill switch + runtime wallet state
+model WalletState {
+  id         Int     @id @default(1)
+  killSwitch Boolean @default(false) @map("kill_switch")
+  updatedAt  Int     @map("updated_at")
+
+  @@map("wallet_state")
+}
