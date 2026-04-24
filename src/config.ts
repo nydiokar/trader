@@ -18,6 +18,7 @@ const ConfigSchema = z.object({
 
   // Jupiter
   JUPITER_BASE_URL: z.string().url().default("https://quote-api.jup.ag/v6"),
+  JUPITER_API_KEY: z.string().optional(),
 
   // Jito
   JITO_BLOCK_ENGINE_URL: z

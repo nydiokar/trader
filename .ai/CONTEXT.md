@@ -1,6 +1,6 @@
 # Trader Bot - Project Context
 
-**Branch:** `main` | **Last Updated:** 2026-04-24 | **Status:** M0 complete. M1 complete. M2 (Jupiter quote integration) is next.
+**Branch:** `main` | **Last Updated:** 2026-04-24 | **Status:** M0 complete. M1 complete. M2 complete. M3 (devnet full swap) is next.
 
 ---
 
@@ -28,8 +28,8 @@ Canonical spec: `solana-signal-bot-spec-v2.md`
 |:--:|:-----|:--------:|:------:|:----------------|
 | M0 | Scaffold | 0.5 day | **Done** | Server starts locally, `/healthz` 200, SQLite DB created at `DB_PATH`, persists across restart |
 | M1 | Webhook ingress | 1 day | **Done** | HMAC auth, nonce, idempotency SM, rate-limit - 100% of spec tests pass |
-| M2 | Jupiter quote integration | 0.5 day | **Next** | Quotes for 5 mints end-to-end; mock + live tests pass |
-| M3 | Devnet full swap | 1 day | **Not started** | >= 28/30 devnet swaps land |
+| M2 | Jupiter quote integration | 0.5 day | **Done** | Quotes for 5 mints end-to-end; mock + live tests pass |
+| M3 | Devnet full swap | 1 day | **Next** | >= 28/30 devnet swaps land |
 | M4 | Mainnet production executor | 3 days | **Not started** | >= 90% landing rate, p95 <= 15s, zero double-spends, all metrics populated |
 | M5 | Jito integration | 2 days | **Not started** | >= 95% landing rate, p95 <= 10s, fallback path tested, UNCERTAIN state proven safe |
 | M6 | Risk layer | 1 day | **Not started** | Every blocker has a test; kill switch verified in prod |
@@ -41,15 +41,25 @@ Canonical spec: `solana-signal-bot-spec-v2.md`
 
 ## Active Work
 
-### Current Priority: M2 - Jupiter Quote Integration
+### Current Priority: M3 - Devnet Full Swap
 
-M1 is complete. The next logical step is the read-only Jupiter layer in `src/executor/jupiter.ts`:
-- implement `getQuote`
-- implement `getSwapInstructions`
-- add typed error handling for timeout, 429, and 5xx
-- add mock tests plus a guarded live quote test
+M2 is complete. The next logical step is the first end-to-end execution path on devnet.
 
-This is the correct next step because M2 is the first dependency for turning accepted signals into executable trades, and it can be built without yet taking mainnet execution risk.
+M3 should focus on:
+- wiring the executor from quote -> swap instructions -> sign -> submit on devnet
+- keeping the path RPC-only for devnet
+- using small fixed trade sizes and measuring landing rate over repeated runs
+- preserving the M1/M2 invariants instead of bypassing them for convenience
+
+M2 completed so far:
+- [x] `getQuote` implemented with spec-aligned request flags
+- [x] `getSwapInstructions` implemented against `/swap-instructions`
+- [x] quote validation for zero-output and excessive price impact
+- [x] typed upstream failure mapping for 429, timeout, and generic upstream errors
+- [x] mock tests covering request shaping and failure mapping
+- [x] guarded live-test harness added for multi-mint quote verification
+- [x] canonical live quote set validated for USDC, BONK, JUP, JTO, and RAY
+- [x] guarded live quote test passes for 5 real mints
 
 ### Completed: M1 - Webhook Ingress
 
@@ -99,9 +109,10 @@ Retry contract for the upstream sender:
 ## Current Operating Reality
 
 - `pnpm build` passes.
-- `pnpm test` passes with 9 tests total as of 2026-04-24.
+- `pnpm test` passes with 15 tests when `RUN_LIVE_JUPITER_TESTS=true`.
+- `pnpm test` now includes deterministic mock coverage for Jupiter plus an opt-in live test path gated by `RUN_LIVE_JUPITER_TESTS=true`.
 - The codebase now has an actual M1 ingress gate in `src/webhook/ingress.ts`, not just endpoint scaffolding.
-- `src/executor/jupiter.ts` is still a stub, so M2 has not started beyond file scaffolding.
+- `src/executor/jupiter.ts` is implemented and live-validated for quote and swap-instructions fetching.
 - Risk blockers, tripwires, and Telegram delivery remain stubbed for later milestones.
 - `/healthz` still reports `rpc: "unchecked"`; full RPC health behavior is deferred until execution plumbing exists.
 
