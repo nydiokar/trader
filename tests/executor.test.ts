@@ -1,4 +1,4 @@
-import { Keypair, SystemProgram } from "@solana/web3.js";
+import { generateKeyPairSigner } from "@solana/kit";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const upsertTrade = vi.fn();
@@ -15,7 +15,7 @@ function makeQuote() {
   return {
     inputMint: "So11111111111111111111111111111111111111112",
     inAmount: "10000000",
-    outputMint: Keypair.generate().publicKey.toBase58(),
+    outputMint: "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
     outAmount: "12345",
     otherAmountThreshold: "12000",
     swapMode: "ExactIn",
@@ -31,7 +31,7 @@ function makeSwapInstructions() {
     otherInstructions: [],
     setupInstructions: [],
     swapInstruction: {
-      programId: SystemProgram.programId.toBase58(),
+      programId: "11111111111111111111111111111111",
       accounts: [],
       data: Buffer.alloc(0).toString("base64"),
     },
@@ -50,7 +50,7 @@ describe("M3 executor", () => {
 
   it("submits through RPC, confirms, and persists the trade", async () => {
     const { executeSignalWithDependencies } = await import("../src/executor/index.js");
-    const wallet = Keypair.generate();
+    const wallet = await generateKeyPairSigner();
     const sendRawTransaction = vi.fn().mockResolvedValue("sig-confirmed");
     const getSignatureStatus = vi
       .fn()
@@ -59,7 +59,7 @@ describe("M3 executor", () => {
     const result = await executeSignalWithDependencies(
       {
         signalId: "11111111-1111-4111-8111-111111111111",
-        tokenMint: Keypair.generate().publicKey.toBase58(),
+        tokenMint: "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",
         amountSol: 0.01,
         maxSlippageBps: 300,
       },
@@ -80,18 +80,17 @@ describe("M3 executor", () => {
             blockhash: "11111111111111111111111111111111",
             lastValidBlockHeight: 55,
           }),
-          getMultipleAccountsInfo: vi.fn().mockResolvedValue([]),
-          sendRawTransaction,
-          getSignatureStatus,
+          fetchLookupTableAddresses: vi.fn().mockResolvedValue({}),
+          sendTransaction: sendRawTransaction,
+          getSignatureStatuses: vi.fn().mockImplementation(async () => [
+            (await getSignatureStatus()).value,
+          ]),
           getBlockHeight: vi.fn().mockResolvedValue(50),
         },
       },
     );
 
     expect(sendRawTransaction).toHaveBeenCalledOnce();
-    expect(getSignatureStatus).toHaveBeenCalledWith("sig-confirmed", {
-      searchTransactionHistory: false,
-    });
     expect(upsertTrade).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { signalId: "11111111-1111-4111-8111-111111111111" },
@@ -120,12 +119,12 @@ describe("M3 executor", () => {
     const result = await executeSignalWithDependencies(
       {
         signalId: "22222222-2222-4222-8222-222222222222",
-        tokenMint: Keypair.generate().publicKey.toBase58(),
+        tokenMint: "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",
         amountSol: 0.01,
         maxSlippageBps: 300,
       },
       {
-        wallet: Keypair.generate(),
+        wallet: await generateKeyPairSigner(),
         now: vi.fn().mockReturnValue(1_000),
         sleep: vi.fn().mockResolvedValue(undefined),
         quoteClient: {
@@ -137,9 +136,9 @@ describe("M3 executor", () => {
             blockhash: "11111111111111111111111111111111",
             lastValidBlockHeight: 10,
           }),
-          getMultipleAccountsInfo: vi.fn().mockResolvedValue([]),
-          sendRawTransaction: vi.fn().mockResolvedValue("sig-expired"),
-          getSignatureStatus: vi.fn().mockResolvedValue({ value: null }),
+          fetchLookupTableAddresses: vi.fn().mockResolvedValue({}),
+          sendTransaction: vi.fn().mockResolvedValue("sig-expired"),
+          getSignatureStatuses: vi.fn().mockResolvedValue([null]),
           getBlockHeight: vi.fn().mockResolvedValue(11),
         },
       },

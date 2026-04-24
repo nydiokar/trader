@@ -8,6 +8,7 @@
   },
   "scripts": {
     "dev": "tsx watch src/index.ts",
+    "devnet:wallet": "tsx src/solana/devnet-wallet.ts",
     "build": "tsc --noEmit",
     "start": "node --experimental-strip-types src/index.ts",
     "lint": "tsc --noEmit",
@@ -25,7 +26,6 @@
     "@prisma/client": "^7.0.0",
     "@solana/kit": "^6.8.0",
     "@solana/spl-token": "0.2.0-alpha.2",
-    "@solana/web3.js": "^1.98.4",
     "bs58": "^5.0.0",
     "dotenv": "^17.4.2",
     "fastify": "^5.0.0",

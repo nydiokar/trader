@@ -1,18 +1,20 @@
 import bs58 from "bs58";
-import { Connection, Keypair } from "@solana/web3.js";
+import { createKeyPairSignerFromBytes, createSolanaRpc } from "@solana/kit";
 import { config } from "../config.js";
 
-let connection: Connection | undefined;
-let keypair: Keypair | undefined;
+let rpcClient: ReturnType<typeof createSolanaRpc> | undefined;
+let walletSigner:
+  | Awaited<ReturnType<typeof createKeyPairSignerFromBytes>>
+  | undefined;
 
-export function getRpcConnection(): Connection {
-  connection ??= new Connection(config.HELIUS_RPC_URL, "confirmed");
-  return connection;
+export function getSolanaRpc() {
+  rpcClient ??= createSolanaRpc(config.HELIUS_RPC_URL);
+  return rpcClient;
 }
 
-export function getTradingKeypair(): Keypair {
-  if (keypair) {
-    return keypair;
+export async function getTradingSigner() {
+  if (walletSigner) {
+    return walletSigner;
   }
 
   const secretKey = bs58.decode(config.WALLET_PRIVATE_KEY_BASE58);
@@ -20,6 +22,6 @@ export function getTradingKeypair(): Keypair {
     throw new Error("WALLET_PRIVATE_KEY_BASE58 must decode to 64 bytes");
   }
 
-  keypair = Keypair.fromSecretKey(secretKey);
-  return keypair;
+  walletSigner = await createKeyPairSignerFromBytes(secretKey, true);
+  return walletSigner;
 }

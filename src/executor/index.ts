@@ -1,14 +1,24 @@
 import type { QuoteResponse, SwapInstructionsResponse } from "@jup-ag/api";
 import {
-  AddressLookupTableAccount,
-  ComputeBudgetProgram,
-  Connection,
-  Keypair,
-  PublicKey,
-  TransactionInstruction,
-  TransactionMessage,
-  VersionedTransaction,
-} from "@solana/web3.js";
+  AccountRole,
+  type Address,
+  address,
+  appendTransactionMessageInstructions,
+  type Base64EncodedWireTransaction,
+  type Blockhash,
+  compressTransactionMessageUsingAddressLookupTables,
+  createTransactionMessage,
+  fetchAddressesForLookupTables,
+  getBase64EncodedWireTransaction,
+  getSignatureFromTransaction,
+  pipe,
+  type Signature,
+  setTransactionMessageComputeUnitLimit,
+  setTransactionMessageComputeUnitPrice,
+  setTransactionMessageFeePayerSigner,
+  setTransactionMessageLifetimeUsingBlockhash,
+  signTransactionMessageWithSigners,
+} from "@solana/kit";
 import { db } from "../db/index.js";
 import { logger } from "../logger.js";
 import {
@@ -16,11 +26,11 @@ import {
   tradesConfirmed,
   tradesSubmitted,
 } from "../metrics/registry.js";
-import { getRpcConnection, getTradingKeypair } from "../solana/runtime.js";
+import { getSolanaRpc, getTradingSigner } from "../solana/runtime.js";
 import { getQuote, getSwapInstructions } from "./jupiter.js";
 
 const FIXED_COMPUTE_UNIT_LIMIT = 1_400_000;
-const FIXED_PRIORITY_FEE_MICROLAMPORTS = 5_000;
+const FIXED_PRIORITY_FEE_MICROLAMPORTS = 5_000n;
 const CONFIRM_TIMEOUT_MS = 45_000;
 const CONFIRM_POLL_INTERVAL_MS = 1_500;
 
@@ -37,29 +47,22 @@ type QuoteClient = {
 type ChainClient = {
   getLatestBlockhash(
     commitment: "confirmed",
-  ): Promise<{ blockhash: string; lastValidBlockHeight: number }>;
-  getMultipleAccountsInfo(pubkeys: PublicKey[]): Promise<Array<{ data: Buffer } | null>>;
-  sendRawTransaction(
-    rawTransaction: Uint8Array,
+  ): Promise<{ blockhash: Blockhash; lastValidBlockHeight: number }>;
+  fetchLookupTableAddresses(addresses: Address[]): Promise<Record<Address, Address[]>>;
+  sendTransaction(
+    base64EncodedWireTransaction: Base64EncodedWireTransaction,
     options: { skipPreflight: boolean; maxRetries: number },
-  ): Promise<string>;
-  getSignatureStatus(
-    signature: string,
+  ): Promise<Signature>;
+  getSignatureStatuses(
+    signatures: Signature[],
     options?: { searchTransactionHistory?: boolean },
-  ): Promise<{
-    value:
-      | {
-          confirmationStatus?: "processed" | "confirmed" | "finalized";
-          err: unknown;
-        }
-      | null;
-  }>;
+  ): Promise<ReadonlyArray<{ confirmationStatus?: string | null; err: unknown } | null>>;
   getBlockHeight(commitment: "confirmed"): Promise<number>;
 };
 
 type ExecutorDependencies = {
   connection: ChainClient;
-  wallet: Keypair;
+  wallet: Awaited<ReturnType<typeof getTradingSigner>>;
   quoteClient: QuoteClient;
   now(): number;
   sleep(ms: number): Promise<void>;
@@ -73,17 +76,19 @@ type PersistedTrade = {
   amountOutActual?: number;
 };
 
-function defaultDependencies(): ExecutorDependencies {
-  return {
-    connection: getRpcConnection(),
-    wallet: getTradingKeypair(),
+function defaultDependencies(): Promise<ExecutorDependencies> {
+  return Promise.resolve({
+    connection: createChainClient(getSolanaRpc()),
     quoteClient: {
       getQuote,
       getSwapInstructions,
     },
     now: () => Date.now(),
-    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-  };
+    sleep: (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
+  }).then(async (deps) => ({
+    ...deps,
+    wallet: await getTradingSigner(),
+  }));
 }
 
 export async function executeSignal(
@@ -103,7 +108,7 @@ export async function executeSignal(
       amountSol,
       maxSlippageBps,
     },
-    defaultDependencies(),
+    await defaultDependencies(),
   );
 }
 
@@ -132,7 +137,7 @@ export async function executeSignalWithDependencies(
 
     const swapInstructions = await deps.quoteClient.getSwapInstructions(
       quote,
-      deps.wallet.publicKey.toBase58(),
+      deps.wallet.address.toString(),
     );
 
     const builtTransaction = await buildSwapTransaction(
@@ -141,11 +146,11 @@ export async function executeSignalWithDependencies(
       swapInstructions,
     );
 
-    const signature = await deps.connection.sendRawTransaction(
-      builtTransaction.transaction.serialize(),
+    const signature = await deps.connection.sendTransaction(
+      getBase64EncodedWireTransaction(builtTransaction.transaction),
       {
-      skipPreflight: true,
-      maxRetries: 0,
+        skipPreflight: true,
+        maxRetries: 0,
       },
     );
     tradesSubmitted.inc({ path: "rpc" });
@@ -158,8 +163,7 @@ export async function executeSignalWithDependencies(
       deps.now,
     );
 
-    const persistedTrade = toPersistedTrade(outcome, signature);
-    await writeTrade(input, createdAt, deps.now(), persistedTrade);
+    await writeTrade(input, createdAt, deps.now(), toPersistedTrade(outcome, signature));
 
     tradesConfirmed.inc({ result: outcome });
     stopTimer();
@@ -171,7 +175,7 @@ export async function executeSignalWithDependencies(
         response: {
           status: "confirmed",
           signal_id: input.signalId,
-          signature,
+          signature: signature.toString(),
           submitted_via: "rpc",
         },
       };
@@ -183,7 +187,7 @@ export async function executeSignalWithDependencies(
       response: {
         error: outcome,
         signal_id: input.signalId,
-        signature,
+        signature: signature.toString(),
       },
     };
   } catch (error) {
@@ -208,99 +212,146 @@ export async function executeSignalWithDependencies(
   }
 }
 
+function createChainClient(rpc: ReturnType<typeof getSolanaRpc>): ChainClient {
+  return {
+    async getLatestBlockhash(commitment) {
+      const response = await rpc.getLatestBlockhash({ commitment }).send();
+      return {
+        blockhash: response.value.blockhash,
+        lastValidBlockHeight: Number(response.value.lastValidBlockHeight),
+      };
+    },
+    async fetchLookupTableAddresses(lookupTableAddresses) {
+      const lookupTables = await fetchAddressesForLookupTables(
+        lookupTableAddresses,
+        rpc,
+      );
+
+      return Object.fromEntries(
+        Object.entries(lookupTables).map(([lookupTableAddress, addresses]) => [
+          lookupTableAddress,
+          [...addresses],
+        ]),
+      ) as Record<Address, Address[]>;
+    },
+    async sendTransaction(base64EncodedWireTransaction, options) {
+      return rpc
+        .sendTransaction(base64EncodedWireTransaction, {
+          encoding: "base64",
+          preflightCommitment: "confirmed",
+          skipPreflight: options.skipPreflight,
+          maxRetries: BigInt(options.maxRetries),
+        })
+        .send();
+    },
+    async getSignatureStatuses(signatures, options) {
+      const response = await rpc
+        .getSignatureStatuses(signatures, options ?? {})
+        .send();
+
+      return response.value;
+    },
+    async getBlockHeight(commitment) {
+      return Number(await rpc.getBlockHeight({ commitment }).send());
+    },
+  };
+}
+
 async function buildSwapTransaction(
   connection: ChainClient,
-  wallet: Keypair,
+  wallet: Awaited<ReturnType<typeof getTradingSigner>>,
   swapInstructions: SwapInstructionsResponse,
 ): Promise<{
-  transaction: VersionedTransaction;
+  transaction: Awaited<ReturnType<typeof signTransactionMessageWithSigners>>;
   lastValidBlockHeight: number;
 }> {
   const latestBlockhash = await connection.getLatestBlockhash("confirmed");
-  const lookupTables = await hydrateLookupTables(
-    connection,
-    swapInstructions.addressLookupTableAddresses,
+  const addressesByLookupTableAddress = await connection.fetchLookupTableAddresses(
+    swapInstructions.addressLookupTableAddresses.map((lookupTableAddress) =>
+      address(lookupTableAddress),
+    ),
   );
 
-  const instructions = [
-    ComputeBudgetProgram.setComputeUnitLimit({ units: FIXED_COMPUTE_UNIT_LIMIT }),
-    ComputeBudgetProgram.setComputeUnitPrice({
-      microLamports: FIXED_PRIORITY_FEE_MICROLAMPORTS,
-    }),
-    ...decodeInstructionGroup(swapInstructions.computeBudgetInstructions),
-    ...decodeInstructionGroup(swapInstructions.otherInstructions),
-    ...decodeInstructionGroup(swapInstructions.setupInstructions),
-    decodeInstruction(swapInstructions.swapInstruction),
-    ...decodeOptionalInstruction(swapInstructions.cleanupInstruction),
-  ];
-
-  const message = new TransactionMessage({
-    payerKey: wallet.publicKey,
-    recentBlockhash: latestBlockhash.blockhash,
-    instructions,
-  }).compileToV0Message(lookupTables);
-
-  const transaction = new VersionedTransaction(message);
-  transaction.sign([wallet]);
+  const transactionMessage = compressTransactionMessageUsingAddressLookupTables(
+    pipe(
+      createTransactionMessage({ version: 0 }),
+      (message) => setTransactionMessageFeePayerSigner(wallet, message),
+      (message) =>
+        setTransactionMessageLifetimeUsingBlockhash(
+          {
+            blockhash: latestBlockhash.blockhash,
+            lastValidBlockHeight: BigInt(latestBlockhash.lastValidBlockHeight),
+          },
+          message,
+        ),
+      (message) => setTransactionMessageComputeUnitLimit(FIXED_COMPUTE_UNIT_LIMIT, message),
+      (message) =>
+        setTransactionMessageComputeUnitPrice(FIXED_PRIORITY_FEE_MICROLAMPORTS, message),
+      (message) =>
+        appendTransactionMessageInstructions(
+          [
+            ...decodeInstructionGroup(swapInstructions.computeBudgetInstructions),
+            ...decodeInstructionGroup(swapInstructions.otherInstructions),
+            ...decodeInstructionGroup(swapInstructions.setupInstructions),
+            decodeInstruction(swapInstructions.swapInstruction),
+            ...decodeOptionalInstruction(swapInstructions.cleanupInstruction),
+          ],
+          message,
+        ),
+    ),
+    addressesByLookupTableAddress,
+  );
 
   return {
-    transaction,
+    transaction: await signTransactionMessageWithSigners(transactionMessage),
     lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
   };
 }
 
-async function hydrateLookupTables(
-  connection: ChainClient,
-  addresses: string[],
-): Promise<AddressLookupTableAccount[]> {
-  if (addresses.length === 0) {
-    return [];
-  }
-
-  const pubkeys = addresses.map((address) => new PublicKey(address));
-  const accounts = await connection.getMultipleAccountsInfo(pubkeys);
-
-  return accounts.map((account, index) => {
-    if (!account) {
-      throw new Error(`ALT ${addresses[index]} not found`);
-    }
-
-    return new AddressLookupTableAccount({
-      key: pubkeys[index]!,
-      state: AddressLookupTableAccount.deserialize(account.data),
-    });
-  });
-}
-
 function decodeInstructionGroup(
   instructions: SwapInstructionsResponse["setupInstructions"],
-): TransactionInstruction[] {
+) {
   return instructions.map((instruction) => decodeInstruction(instruction));
 }
 
 function decodeOptionalInstruction(
   instruction: SwapInstructionsResponse["cleanupInstruction"] | undefined,
-): TransactionInstruction[] {
+) {
   return instruction ? [decodeInstruction(instruction)] : [];
 }
 
 function decodeInstruction(
   instruction: NonNullable<SwapInstructionsResponse["swapInstruction"]>,
-): TransactionInstruction {
-  return new TransactionInstruction({
-    programId: new PublicKey(instruction.programId),
-    keys: instruction.accounts.map((account) => ({
-      pubkey: new PublicKey(account.pubkey),
-      isSigner: account.isSigner,
-      isWritable: account.isWritable,
+) {
+  return {
+    programAddress: address(instruction.programId),
+    accounts: instruction.accounts.map((account) => ({
+      address: address(account.pubkey),
+      role: toAccountRole(account.isSigner, account.isWritable),
     })),
-    data: Buffer.from(instruction.data, "base64"),
-  });
+    data: Uint8Array.from(Buffer.from(instruction.data, "base64")),
+  };
+}
+
+function toAccountRole(isSigner: boolean, isWritable: boolean): AccountRole {
+  if (isSigner && isWritable) {
+    return AccountRole.WRITABLE_SIGNER;
+  }
+
+  if (isSigner) {
+    return AccountRole.READONLY_SIGNER;
+  }
+
+  if (isWritable) {
+    return AccountRole.WRITABLE;
+  }
+
+  return AccountRole.READONLY;
 }
 
 async function pollForConfirmation(
   connection: ChainClient,
-  signature: string,
+  signature: Signature,
   lastValidBlockHeight: number,
   sleep: ExecutorDependencies["sleep"],
   now: ExecutorDependencies["now"],
@@ -309,27 +360,28 @@ async function pollForConfirmation(
 
   while (now() - startedAt < CONFIRM_TIMEOUT_MS) {
     const [status, blockHeight] = await Promise.all([
-      connection.getSignatureStatus(signature, { searchTransactionHistory: false }),
+      connection.getSignatureStatuses([signature], { searchTransactionHistory: false }),
       connection.getBlockHeight("confirmed"),
     ]);
 
+    const currentStatus = status[0];
     if (
-      status.value?.confirmationStatus === "confirmed" ||
-      status.value?.confirmationStatus === "finalized"
+      currentStatus?.confirmationStatus === "confirmed" ||
+      currentStatus?.confirmationStatus === "finalized"
     ) {
-      return status.value.err ? "failed_onchain" : "confirmed";
+      return currentStatus.err ? "failed_onchain" : "confirmed";
     }
 
     if (blockHeight > lastValidBlockHeight) {
-      const finalCheck = await connection.getSignatureStatus(signature, {
+      const [finalCheck] = await connection.getSignatureStatuses([signature], {
         searchTransactionHistory: false,
       });
 
       if (
-        finalCheck.value?.confirmationStatus === "confirmed" ||
-        finalCheck.value?.confirmationStatus === "finalized"
+        finalCheck?.confirmationStatus === "confirmed" ||
+        finalCheck?.confirmationStatus === "finalized"
       ) {
-        return finalCheck.value.err ? "failed_onchain" : "confirmed";
+        return finalCheck.err ? "failed_onchain" : "confirmed";
       }
 
       return "expired";
@@ -343,10 +395,10 @@ async function pollForConfirmation(
 
 function toPersistedTrade(
   outcome: ExecutionOutcome,
-  signature: string,
+  signature: Signature,
 ): PersistedTrade {
   return {
-    signature,
+    signature: signature.toString(),
     state: outcome,
     submittedVia: "rpc",
     errorMsg: outcome === "confirmed" ? undefined : outcome,
