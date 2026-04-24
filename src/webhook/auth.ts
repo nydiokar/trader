@@ -2,6 +2,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import type { FastifyRequest, FastifyReply } from "fastify";
 import { config } from "../config.js";
 import { logger } from "../logger.js";
+import { signalsReceived } from "../metrics/registry.js";
 
 const TIMESTAMP_TOLERANCE_SECONDS = 60;
 
@@ -16,23 +17,27 @@ export async function verifyHmac(
   const signature = request.headers["x-signature"];
 
   if (typeof timestamp !== "string") {
+    signalsReceived.inc({ result: "auth_failed" });
     await reply.code(403).send({ error: "missing x-timestamp" });
     return;
   }
 
   const ts = parseInt(timestamp, 10);
   if (isNaN(ts)) {
+    signalsReceived.inc({ result: "auth_failed" });
     await reply.code(403).send({ error: "invalid x-timestamp" });
     return;
   }
 
   const nowSeconds = Math.floor(Date.now() / 1000);
   if (Math.abs(nowSeconds - ts) > TIMESTAMP_TOLERANCE_SECONDS) {
+    signalsReceived.inc({ result: "auth_failed" });
     await reply.code(403).send({ error: "timestamp outside window" });
     return;
   }
 
   if (typeof signature !== "string") {
+    signalsReceived.inc({ result: "auth_failed" });
     await reply.code(401).send({ error: "missing x-signature" });
     return;
   }
@@ -55,6 +60,7 @@ export async function verifyHmac(
 
   if (!valid) {
     logger.warn({ signal_id: null }, "HMAC verification failed");
+    signalsReceived.inc({ result: "auth_failed" });
     await reply.code(401).send({ error: "invalid signature" });
     return;
   }

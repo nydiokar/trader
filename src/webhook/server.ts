@@ -3,7 +3,9 @@ import rateLimit from "@fastify/rate-limit";
 import { config } from "../config.js";
 import { registerRoutes } from "./routes.js";
 
-export async function buildServer(): Promise<FastifyInstance> {
+export async function buildServer(
+  options?: Parameters<typeof registerRoutes>[1],
+): Promise<FastifyInstance> {
   const app = Fastify({
     logger: {
       level: config.LOG_LEVEL,
@@ -24,7 +26,10 @@ export async function buildServer(): Promise<FastifyInstance> {
   await app.register(rateLimit, {
     max: 60,
     timeWindow: "1 minute",
-    errorResponseBuilder: () => ({ error: "Too Many Requests" }),
+    errorResponseBuilder: () => ({
+      statusCode: 429,
+      error: "Too Many Requests",
+    }),
   });
 
   // Expose raw body string for HMAC verification (spec §2.2)
@@ -41,7 +46,7 @@ export async function buildServer(): Promise<FastifyInstance> {
     },
   );
 
-  await registerRoutes(app);
+  await registerRoutes(app, options);
 
   return app as unknown as FastifyInstance;
 }

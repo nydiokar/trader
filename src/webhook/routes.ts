@@ -1,14 +1,40 @@
 import type { FastifyInstance } from "fastify";
 import { db } from "../db/index.js";
 import { logger } from "../logger.js";
-import { register } from "../metrics/registry.js";
-import { signalsReceived } from "../metrics/registry.js";
-import { verifyHmac } from "./auth.js";
-import { SignalPayload } from "./schemas.js";
+import { register, signalsReceived } from "../metrics/registry.js";
 import { config } from "../config.js";
+import { verifyHmac } from "./auth.js";
+import {
+  completeSignal,
+  enterSignal,
+  pruneExpiredNonces,
+  registerNonce,
+} from "./ingress.js";
+import { SignalPayload } from "./schemas.js";
 
-export async function registerRoutes(app: FastifyInstance): Promise<void> {
-  // Spec §2.7 — health check
+type SignalProcessor = (payload: {
+  signal_id: string;
+  token_mint: string;
+  amount_sol: number;
+  max_slippage_bps: number;
+}) => Promise<{
+  state: "done" | "failed" | "rejected";
+  decision: string;
+  response: unknown;
+}>;
+
+export async function registerRoutes(
+  app: FastifyInstance,
+  options?: { processSignal?: SignalProcessor },
+): Promise<void> {
+  const processSignal: SignalProcessor =
+    options?.processSignal ??
+    (async (payload) => ({
+      state: "done",
+      decision: "accepted",
+      response: { status: "queued", signal_id: payload.signal_id },
+    }));
+
   app.get("/healthz", async (_req, reply) => {
     let dbOk = false;
     let rpcOk = false;
@@ -18,14 +44,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       await db.$queryRaw`SELECT 1`;
       dbOk = true;
     } catch {
-      // db check failed
+      // DB check failed.
     }
 
-    // RPC check deferred until executor module exists (M4)
-    // For M0 we report rpc: "unchecked"
     const killSwitch = config.KILL_SWITCH;
-
     const status = dbOk ? 200 : 503;
+
     return reply.code(status).send({
       ok: dbOk,
       db: dbOk ? "ok" : "error",
@@ -35,29 +59,82 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     });
   });
 
-  // Spec §5.2 — Prometheus metrics endpoint
   app.get("/metrics", async (_req, reply) => {
     const metrics = await register.metrics();
-    return reply
-      .header("Content-Type", register.contentType)
-      .send(metrics);
+    return reply.header("Content-Type", register.contentType).send(metrics);
   });
 
-  // Spec §2.1 — signal ingestion endpoint (executor not yet wired — M1)
   app.post("/signal", async (request, reply) => {
     await verifyHmac(request, reply);
     if (reply.sent) return;
 
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    pruneExpiredNonces(nowSeconds);
+
     const parsed = SignalPayload.safeParse(request.body);
     if (!parsed.success) {
       signalsReceived.inc({ result: "rejected" });
-      return reply.code(400).send({ error: "invalid payload", details: parsed.error.format() });
+      return reply
+        .code(400)
+        .send({ error: "invalid payload", details: parsed.error.format() });
     }
 
     const payload = parsed.data;
-    logger.info({ signal_id: payload.signal_id, token_mint: payload.token_mint }, "signal received — executor not yet wired (M1)");
+
+    if (!registerNonce(payload.nonce, nowSeconds)) {
+      signalsReceived.inc({ result: "replay" });
+      return reply.code(409).send({ error: "nonce replay" });
+    }
+
+    const ingress = enterSignal(payload.signal_id, JSON.stringify(payload), nowSeconds);
+
+    if (ingress.kind === "in_flight") {
+      signalsReceived.inc({ result: "replay" });
+      return reply
+        .code(202)
+        .send({ status: "already_processing", signal_id: payload.signal_id });
+    }
+
+    if (ingress.kind === "replay") {
+      signalsReceived.inc({ result: "replay" });
+      return reply.code(200).send(ingress.response);
+    }
+
+    logger.info(
+      { signal_id: payload.signal_id, token_mint: payload.token_mint },
+      "signal accepted",
+    );
     signalsReceived.inc({ result: "accepted" });
 
-    return reply.code(200).send({ status: "queued", signal_id: payload.signal_id });
+    try {
+      const result = await processSignal(payload);
+
+      completeSignal(
+        payload.signal_id,
+        result.state,
+        result.decision,
+        result.response,
+        Math.floor(Date.now() / 1000),
+      );
+
+      return reply.code(200).send(result.response);
+    } catch (error) {
+      logger.error({ err: error, signal_id: payload.signal_id }, "signal processing failed");
+
+      const failureResponse = {
+        error: "internal processing failure",
+        signal_id: payload.signal_id,
+      };
+
+      completeSignal(
+        payload.signal_id,
+        "failed",
+        "processing_error",
+        failureResponse,
+        Math.floor(Date.now() / 1000),
+      );
+
+      return reply.code(500).send(failureResponse);
+    }
   });
 }

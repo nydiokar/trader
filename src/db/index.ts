@@ -2,6 +2,7 @@ import { PrismaClient } from "../../generated/prisma/client.js";
 import { PrismaBetterSqlite3 } from "@prisma/adapter-better-sqlite3";
 import { config } from "../config.js";
 import { logger } from "../logger.js";
+import { closeIngressDb } from "../webhook/ingress.js";
 
 const dbPath = config.DATABASE_URL.replace(/^file:/, "");
 
@@ -21,4 +22,5 @@ export async function connectDb(): Promise<void> {
 
 export async function disconnectDb(): Promise<void> {
   await db.$disconnect();
+  closeIngressDb();
 }
