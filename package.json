@@ -9,6 +9,7 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "devnet:wallet": "tsx src/solana/devnet-wallet.ts",
+    "devnet:status": "tsx src/solana/devnet-status.ts",
     "build": "tsc --noEmit",
     "start": "node --experimental-strip-types src/index.ts",
     "lint": "tsc --noEmit",
