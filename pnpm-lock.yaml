@@ -26,6 +26,9 @@ importers:
       '@solana/spl-token':
         specifier: 0.2.0-alpha.2
         version: 0.2.0-alpha.2(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6)
+      '@solana/web3.js':
+        specifier: ^1.98.4
+        version: 1.98.4(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6)
       bs58:
         specifier: ^5.0.0
         version: 5.0.0

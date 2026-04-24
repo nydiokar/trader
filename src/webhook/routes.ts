@@ -3,6 +3,7 @@ import { db } from "../db/index.js";
 import { logger } from "../logger.js";
 import { register, signalsReceived } from "../metrics/registry.js";
 import { config } from "../config.js";
+import { executeSignal } from "../executor/index.js";
 import { verifyHmac } from "./auth.js";
 import {
   completeSignal,
@@ -29,11 +30,13 @@ export async function registerRoutes(
 ): Promise<void> {
   const processSignal: SignalProcessor =
     options?.processSignal ??
-    (async (payload) => ({
-      state: "done",
-      decision: "accepted",
-      response: { status: "queued", signal_id: payload.signal_id },
-    }));
+    (async (payload) =>
+      executeSignal(
+        payload.signal_id,
+        payload.token_mint,
+        payload.amount_sol,
+        payload.max_slippage_bps,
+      ));
 
   app.get("/healthz", async (_req, reply) => {
     let dbOk = false;

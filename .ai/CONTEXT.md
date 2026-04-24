@@ -1,6 +1,6 @@
 # Trader Bot - Project Context
 
-**Branch:** `main` | **Last Updated:** 2026-04-24 | **Status:** M0 complete. M1 complete. M2 complete. M3 (devnet full swap) is next.
+**Branch:** `main` | **Last Updated:** 2026-04-24 | **Status:** M0 complete. M1 complete. M2 complete. M3 executor path is wired; gated devnet validation is pending.
 
 ---
 
@@ -41,15 +41,17 @@ Canonical spec: `solana-signal-bot-spec-v2.md`
 
 ## Active Work
 
-### Current Priority: M3 - Devnet Full Swap
+### Current Priority: M3 - Devnet Full Swap Validation
 
-M2 is complete. The next logical step is the first end-to-end execution path on devnet.
+M2 is complete. The first real executor path is now wired, and the remaining M3 acceptance work is repeated live validation on devnet.
 
-M3 should focus on:
-- wiring the executor from quote -> swap instructions -> sign -> submit on devnet
-- keeping the path RPC-only for devnet
-- using small fixed trade sizes and measuring landing rate over repeated runs
-- preserving the M1/M2 invariants instead of bypassing them for convenience
+M3 now includes:
+- [x] executor wired from accepted signal -> quote -> swap instructions -> sign -> RPC submit -> confirm
+- [x] RPC-only execution path for M3, with no Jito path introduced
+- [x] trade persistence on terminal executor outcomes via `trades`
+- [x] deterministic executor tests for confirmed and expired outcomes
+- [x] explicit gated live devnet swap harness in `tests/executor.devnet.live.test.ts`
+- [ ] repeated live devnet swap validation to prove landing rate against the acceptance target
 
 M2 completed so far:
 - [x] `getQuote` implemented with spec-aligned request flags
@@ -109,10 +111,11 @@ Retry contract for the upstream sender:
 ## Current Operating Reality
 
 - `pnpm build` passes.
-- `pnpm test` passes with 15 tests when `RUN_LIVE_JUPITER_TESTS=true`.
+- `pnpm test` passes with 16 deterministic tests; guarded live Jupiter and guarded live devnet swap tests remain opt-in.
 - `pnpm test` now includes deterministic mock coverage for Jupiter plus an opt-in live test path gated by `RUN_LIVE_JUPITER_TESTS=true`.
 - The codebase now has an actual M1 ingress gate in `src/webhook/ingress.ts`, not just endpoint scaffolding.
 - `src/executor/jupiter.ts` is implemented and live-validated for quote and swap-instructions fetching.
+- `src/executor/index.ts` now performs a real RPC-only execution path and writes terminal trade rows.
 - Risk blockers, tripwires, and Telegram delivery remain stubbed for later milestones.
 - `/healthz` still reports `rpc: "unchecked"`; full RPC health behavior is deferred until execution plumbing exists.
 

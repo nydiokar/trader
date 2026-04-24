@@ -70,7 +70,15 @@ async function makeApp(options?: {
   const { buildServer } = await import("../src/webhook/server.js");
 
   await connectDb();
-  const app = await buildServer(options);
+  const app = await buildServer({
+    processSignal:
+      options?.processSignal ??
+      (async (payload) => ({
+        state: "done",
+        decision: "accepted",
+        response: { status: "queued", signal_id: payload.signal_id },
+      })),
+  });
 
   return {
     app,
