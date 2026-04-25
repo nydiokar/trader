@@ -8,6 +8,7 @@
   },
   "scripts": {
     "dev": "tsx watch src/index.ts",
+    "devnet:airdrop": "tsx src/solana/devnet-airdrop.ts",
     "devnet:wallet": "tsx src/solana/devnet-wallet.ts",
     "devnet:status": "tsx src/solana/devnet-status.ts",
     "build": "tsc --noEmit",
