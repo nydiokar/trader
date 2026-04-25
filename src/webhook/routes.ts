@@ -1,9 +1,10 @@
 import type { FastifyInstance } from "fastify";
 import { db } from "../db/index.js";
 import { logger } from "../logger.js";
-import { register, signalsReceived } from "../metrics/registry.js";
+import { register, signalsReceived, walletSolBalance } from "../metrics/registry.js";
 import { config } from "../config.js";
 import { executeSignal } from "../executor/index.js";
+import { getSolanaRpc, getTradingSigner } from "../solana/runtime.js";
 import { verifyHmac } from "./auth.js";
 import {
   completeSignal,
@@ -24,9 +25,11 @@ type SignalProcessor = (payload: {
   response: unknown;
 }>;
 
+type HealthCheck = () => Promise<{ rpcOk: boolean; walletSol: number }>;
+
 export async function registerRoutes(
   app: FastifyInstance,
-  options?: { processSignal?: SignalProcessor },
+  options?: { processSignal?: SignalProcessor; healthCheck?: HealthCheck },
 ): Promise<void> {
   const processSignal: SignalProcessor =
     options?.processSignal ??
@@ -37,6 +40,7 @@ export async function registerRoutes(
         payload.amount_sol,
         payload.max_slippage_bps,
       ));
+  const healthCheck = options?.healthCheck ?? checkSolanaHealth;
 
   app.get("/healthz", async (_req, reply) => {
     let dbOk = false;
@@ -50,13 +54,22 @@ export async function registerRoutes(
       // DB check failed.
     }
 
+    try {
+      const solanaHealth = await healthCheck();
+      rpcOk = solanaHealth.rpcOk;
+      walletSol = solanaHealth.walletSol;
+      walletSolBalance.set(walletSol);
+    } catch {
+      rpcOk = false;
+    }
+
     const killSwitch = config.KILL_SWITCH;
-    const status = dbOk ? 200 : 503;
+    const status = dbOk && rpcOk ? 200 : 503;
 
     return reply.code(status).send({
-      ok: dbOk,
+      ok: dbOk && rpcOk,
       db: dbOk ? "ok" : "error",
-      rpc: rpcOk ? "ok" : "unchecked",
+      rpc: rpcOk ? "ok" : "error",
       wallet_sol: walletSol,
       kill_switch: killSwitch,
     });
@@ -139,5 +152,40 @@ export async function registerRoutes(
 
       return reply.code(500).send(failureResponse);
     }
+  });
+}
+
+async function checkSolanaHealth(): Promise<{ rpcOk: boolean; walletSol: number }> {
+  const rpc = getSolanaRpc();
+  const signer = await getTradingSigner();
+
+  return withTimeout(
+    Promise.all([
+      rpc.getLatestBlockhash({ commitment: "confirmed" }).send(),
+      rpc.getBalance(signer.address, { commitment: "confirmed" }).send(),
+    ]).then(([, balance]) => ({
+      rpcOk: true,
+      walletSol: Number(balance.value) / 1_000_000_000,
+    })),
+    2_000,
+  );
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      reject(new Error(`health check timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    promise.then(
+      (value) => {
+        clearTimeout(timeout);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timeout);
+        reject(error);
+      },
+    );
   });
 }

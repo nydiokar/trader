@@ -50,6 +50,7 @@ async function makeApp(options?: {
     decision: string;
     response: unknown;
   }>;
+  healthCheck?: () => Promise<{ rpcOk: boolean; walletSol: number }>;
 }) {
   vi.resetModules();
 
@@ -78,6 +79,7 @@ async function makeApp(options?: {
         decision: "accepted",
         response: { status: "queued", signal_id: payload.signal_id },
       })),
+    healthCheck: options?.healthCheck,
   });
 
   return {
@@ -117,6 +119,52 @@ describe("M1 webhook ingress", () => {
       expect(response.json()).toEqual({
         status: "queued",
         signal_id: "11111111-1111-4111-8111-111111111111",
+      });
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("healthz returns 200 when DB and Solana RPC checks pass", async () => {
+    const ctx = await makeApp({
+      healthCheck: vi.fn().mockResolvedValue({ rpcOk: true, walletSol: 1.25 }),
+    });
+    try {
+      const response = await ctx.app.inject({
+        method: "GET",
+        url: "/healthz",
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({
+        ok: true,
+        db: "ok",
+        rpc: "ok",
+        wallet_sol: 1.25,
+        kill_switch: false,
+      });
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("healthz returns 503 when Solana RPC check fails", async () => {
+    const ctx = await makeApp({
+      healthCheck: vi.fn().mockRejectedValue(new Error("rpc down")),
+    });
+    try {
+      const response = await ctx.app.inject({
+        method: "GET",
+        url: "/healthz",
+      });
+
+      expect(response.statusCode).toBe(503);
+      expect(response.json()).toEqual({
+        ok: false,
+        db: "ok",
+        rpc: "error",
+        wallet_sol: 0,
+        kill_switch: false,
       });
     } finally {
       await ctx.cleanup();
