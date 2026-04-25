@@ -69,10 +69,11 @@ Devnet wallet state:
   - `data/devnet-wallet.json`
   - `data/devnet-wallet.base58`
 - `pnpm devnet:status` reads the ignored wallet file and checks balance without printing the private key.
-- `pnpm devnet:airdrop` attempts configurable smaller airdrops using `DEVNET_AIRDROP_AMOUNTS_SOL` (default `1,0.5,0.3,0.2,0.1`).
+- `pnpm devnet:airdrop` attempts configurable smaller airdrops using `DEVNET_AIRDROP_AMOUNTS_SOL` (default `1,0.5,0.3,0.2,0.1`) and `DEVNET_AIRDROP_COOLDOWN_MS` (default `30000`).
 - Current observed balance is `0` lamports.
 - Public devnet RPC airdrop via `https://api.devnet.solana.com` failed with JSON-RPC `-32603 Internal error`; funding still needs another faucet/RPC route or a transfer from a funded devnet wallet.
 - A smaller airdrop sequence was attempted on 2026-04-25: `1` SOL failed with `-32603`, then `0.5`, `0.3`, `0.2`, and `0.1` SOL failed with HTTP `429 Too Many Requests`.
+- A second paced attempt on 2026-04-25 used 30-second cooldowns for `0.1`, `0.05`, `0.02`, and `0.01` SOL; every request returned HTTP `429 Too Many Requests`.
 
 M2 completed so far:
 - [x] `getQuote` implemented with spec-aligned request flags

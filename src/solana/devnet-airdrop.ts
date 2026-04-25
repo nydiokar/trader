@@ -6,11 +6,16 @@ import { address, createKeyPairSignerFromBytes, createSolanaRpc, lamports } from
 const DEFAULT_DEVNET_RPC_URL = "https://api.devnet.solana.com";
 const DEFAULT_BASE58_PATH = path.resolve("data", "devnet-wallet.base58");
 const DEFAULT_AMOUNTS_SOL = [1, 0.5, 0.3, 0.2, 0.1];
+const DEFAULT_COOLDOWN_MS = 30_000;
 
 async function main(): Promise<void> {
   const rpcUrl = process.env["DEVNET_RPC_URL"] ?? DEFAULT_DEVNET_RPC_URL;
   const base58Path = process.env["DEVNET_WALLET_BASE58_PATH"] ?? DEFAULT_BASE58_PATH;
   const amountsSol = parseAmounts(process.env["DEVNET_AIRDROP_AMOUNTS_SOL"]);
+  const cooldownMs = parsePositiveInt(
+    process.env["DEVNET_AIRDROP_COOLDOWN_MS"],
+    DEFAULT_COOLDOWN_MS,
+  );
   const secretKeyBase58 =
     process.env["WALLET_PRIVATE_KEY_BASE58"] ?? (await readFile(base58Path, "utf8")).trim();
 
@@ -30,12 +35,26 @@ async function main(): Promise<void> {
       break;
     } catch (error) {
       console.log(`Airdrop ${amountSol} SOL failed: ${formatError(error)}`);
-      await new Promise<void>((resolve) => setTimeout(resolve, 2_000));
+      console.log(`Cooldown: ${cooldownMs}ms`);
+      await new Promise<void>((resolve) => setTimeout(resolve, cooldownMs));
     }
   }
 
   const balance = await rpc.getBalance(address(signer.address)).send();
   console.log(`Final balance: ${balance.value} lamports`);
+}
+
+function parsePositiveInt(raw: string | undefined, fallback: number): number {
+  if (!raw) {
+    return fallback;
+  }
+
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error("DEVNET_AIRDROP_COOLDOWN_MS must be a positive integer");
+  }
+
+  return parsed;
 }
 
 function parseAmounts(raw: string | undefined): number[] {
