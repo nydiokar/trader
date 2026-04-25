@@ -1,6 +1,6 @@
 # Trader Bot - Project Context
 
-**Branch:** `main` | **Last Updated:** 2026-04-24 | **Status:** M0 complete. M1 complete. M2 complete. M3 executor path is wired; gated devnet validation is pending.
+**Branch:** `main` | **Last Updated:** 2026-04-25 | **Status:** M0 complete. M1 complete. M2 complete. M3 executor path is wired on Solana Kit; gated devnet validation is pending.
 
 ---
 
@@ -29,7 +29,7 @@ Canonical spec: `solana-signal-bot-spec-v2.md`
 | M0 | Scaffold | 0.5 day | **Done** | Server starts locally, `/healthz` 200, SQLite DB created at `DB_PATH`, persists across restart |
 | M1 | Webhook ingress | 1 day | **Done** | HMAC auth, nonce, idempotency SM, rate-limit - 100% of spec tests pass |
 | M2 | Jupiter quote integration | 0.5 day | **Done** | Quotes for 5 mints end-to-end; mock + live tests pass |
-| M3 | Devnet full swap | 1 day | **Next** | >= 28/30 devnet swaps land |
+| M3 | Devnet full swap | 1 day | **In progress** | >= 28/30 devnet swaps land |
 | M4 | Mainnet production executor | 3 days | **Not started** | >= 90% landing rate, p95 <= 15s, zero double-spends, all metrics populated |
 | M5 | Jito integration | 2 days | **Not started** | >= 95% landing rate, p95 <= 10s, fallback path tested, UNCERTAIN state proven safe |
 | M6 | Risk layer | 1 day | **Not started** | Every blocker has a test; kill switch verified in prod |
@@ -48,10 +48,29 @@ M2 is complete. The first real executor path is now wired, and the remaining M3 
 M3 now includes:
 - [x] executor wired from accepted signal -> quote -> swap instructions -> sign -> RPC submit -> confirm
 - [x] RPC-only execution path for M3, with no Jito path introduced
+- [x] executor/runtime ported from legacy `@solana/web3.js` usage to `@solana/kit`
 - [x] trade persistence on terminal executor outcomes via `trades`
 - [x] deterministic executor tests for confirmed and expired outcomes
 - [x] explicit gated live devnet swap harness in `tests/executor.devnet.live.test.ts`
+- [x] local devnet wallet bootstrap helper in `src/solana/devnet-wallet.ts`
+- [x] local devnet wallet status helper in `src/solana/devnet-status.ts`
+- [ ] fund devnet wallet
+- [ ] identify/confirm a Jupiter-routable devnet mint/path
 - [ ] repeated live devnet swap validation to prove landing rate against the acceptance target
+
+Recent M3 commits:
+- `cf0ee03` Wire M3 RPC executor path
+- `ed68af1` Port executor to Solana Kit
+- `042ba9d` Add devnet wallet status helper
+
+Devnet wallet state:
+- A local devnet wallet was generated at address `6QP4JE77fFTseCuRSXj1MaEM3muu7T9CNpQcKF8KfyCp`.
+- Wallet secret files are under ignored `data/` paths and must not be committed:
+  - `data/devnet-wallet.json`
+  - `data/devnet-wallet.base58`
+- `pnpm devnet:status` reads the ignored wallet file and checks balance without printing the private key.
+- Current observed balance is `0` lamports.
+- Public devnet RPC airdrop via `https://api.devnet.solana.com` failed with JSON-RPC `-32603 Internal error`; funding still needs another faucet/RPC route or a transfer from a funded devnet wallet.
 
 M2 completed so far:
 - [x] `getQuote` implemented with spec-aligned request flags
@@ -112,10 +131,10 @@ Retry contract for the upstream sender:
 
 - `pnpm build` passes.
 - `pnpm test` passes with 16 deterministic tests; guarded live Jupiter and guarded live devnet swap tests remain opt-in.
-- `pnpm test` now includes deterministic mock coverage for Jupiter plus an opt-in live test path gated by `RUN_LIVE_JUPITER_TESTS=true`.
+- `pnpm test` now includes deterministic mock coverage for Jupiter plus opt-in live paths gated by `RUN_LIVE_JUPITER_TESTS=true` and `RUN_DEVNET_SWAP_TESTS=true`.
 - The codebase now has an actual M1 ingress gate in `src/webhook/ingress.ts`, not just endpoint scaffolding.
 - `src/executor/jupiter.ts` is implemented and live-validated for quote and swap-instructions fetching.
-- `src/executor/index.ts` now performs a real RPC-only execution path and writes terminal trade rows.
+- `src/executor/index.ts` now performs a real RPC-only execution path using `@solana/kit` and writes terminal trade rows.
 - Risk blockers, tripwires, and Telegram delivery remain stubbed for later milestones.
 - `/healthz` still reports `rpc: "unchecked"`; full RPC health behavior is deferred until execution plumbing exists.
 
@@ -132,12 +151,14 @@ Retry contract for the upstream sender:
 | Honeypot simulation deferred to v2 | Too error-prone for current scope |
 | Local-first hosting | No platform lock-in before canary |
 | M1 ingress gate uses direct `better-sqlite3` statements | Needed to guarantee a literal `BEGIN IMMEDIATE` critical section for replay/race safety |
+| `@solana/kit` over direct legacy `@solana/web3.js` | Current Solana SDK direction; avoids growing new executor code on legacy APIs |
 
 ---
 
 ## Open Questions
 
-None currently. The spec remains the authority; deviations should be logged explicitly.
+- How will the local devnet wallet be funded? Public devnet RPC airdrop failed once with `-32603`.
+- Is there a confirmed Jupiter-routable devnet mint/path for M3, or should M3 devnet validation prove the Kit/RPC transaction landing path while Jupiter swap validation remains mainnet-read/live or tiny-mainnet gated?
 
 ---
 
