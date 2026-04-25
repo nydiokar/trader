@@ -65,11 +65,7 @@ describe("M3 executor", () => {
       },
       {
         wallet,
-        now: vi
-          .fn()
-          .mockReturnValueOnce(1_000)
-          .mockReturnValueOnce(2_000)
-          .mockReturnValueOnce(2_000),
+        now: vi.fn().mockReturnValue(1_000),
         sleep: vi.fn().mockResolvedValue(undefined),
         quoteClient: {
           getQuote: vi.fn().mockResolvedValue(makeQuote()),
@@ -97,7 +93,7 @@ describe("M3 executor", () => {
         create: expect.objectContaining({
           state: "confirmed",
           submittedVia: "rpc",
-          signature: "sig-confirmed",
+          signature: expect.any(String),
         }),
       }),
     );
@@ -107,7 +103,7 @@ describe("M3 executor", () => {
       response: {
         status: "confirmed",
         signal_id: "11111111-1111-4111-8111-111111111111",
-        signature: "sig-confirmed",
+        signature: expect.any(String),
         submitted_via: "rpc",
       },
     });
@@ -158,7 +154,164 @@ describe("M3 executor", () => {
       response: {
         error: "expired",
         signal_id: "22222222-2222-4222-8222-222222222222",
-        signature: "sig-expired",
+        signature: expect.any(String),
+      },
+    });
+  });
+
+  it("persists pre-submit failures without a transaction signature", async () => {
+    const { executeSignalWithDependencies } = await import("../src/executor/index.js");
+    const sendTransaction = vi.fn();
+
+    const result = await executeSignalWithDependencies(
+      {
+        signalId: "33333333-3333-4333-8333-333333333333",
+        tokenMint: "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",
+        amountSol: 0.01,
+        maxSlippageBps: 300,
+      },
+      {
+        wallet: await generateKeyPairSigner(),
+        now: vi.fn().mockReturnValue(1_000),
+        sleep: vi.fn().mockResolvedValue(undefined),
+        quoteClient: {
+          getQuote: vi.fn().mockRejectedValue(new Error("quote unavailable")),
+          getSwapInstructions: vi.fn(),
+        },
+        connection: {
+          getLatestBlockhash: vi.fn(),
+          fetchLookupTableAddresses: vi.fn(),
+          sendTransaction,
+          getSignatureStatuses: vi.fn(),
+          getBlockHeight: vi.fn(),
+        },
+      },
+    );
+
+    expect(sendTransaction).not.toHaveBeenCalled();
+    expect(upsertTrade).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({
+          state: "pre_submit_failed",
+          signature: null,
+          errorMsg: "quote unavailable",
+        }),
+      }),
+    );
+    expect(result).toEqual({
+      state: "failed",
+      decision: "pre_submit_failed",
+      response: {
+        error: "pre_submit_failed",
+        signal_id: "33333333-3333-4333-8333-333333333333",
+      },
+    });
+  });
+
+  it("marks confirmed transaction errors as failed_onchain", async () => {
+    const { executeSignalWithDependencies } = await import("../src/executor/index.js");
+
+    const result = await executeSignalWithDependencies(
+      {
+        signalId: "44444444-4444-4444-8444-444444444444",
+        tokenMint: "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",
+        amountSol: 0.01,
+        maxSlippageBps: 300,
+      },
+      {
+        wallet: await generateKeyPairSigner(),
+        now: vi.fn().mockReturnValue(1_000),
+        sleep: vi.fn().mockResolvedValue(undefined),
+        quoteClient: {
+          getQuote: vi.fn().mockResolvedValue(makeQuote()),
+          getSwapInstructions: vi.fn().mockResolvedValue(makeSwapInstructions()),
+        },
+        connection: {
+          getLatestBlockhash: vi.fn().mockResolvedValue({
+            blockhash: "11111111111111111111111111111111",
+            lastValidBlockHeight: 55,
+          }),
+          fetchLookupTableAddresses: vi.fn().mockResolvedValue({}),
+          sendTransaction: vi.fn().mockResolvedValue("sig-failed"),
+          getSignatureStatuses: vi.fn().mockResolvedValue([
+            {
+              confirmationStatus: "confirmed",
+              err: { InstructionError: [0, "Custom"] },
+            },
+          ]),
+          getBlockHeight: vi.fn().mockResolvedValue(50),
+        },
+      },
+    );
+
+    expect(upsertTrade).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({
+          state: "failed_onchain",
+          signature: expect.any(String),
+          errorMsg: "failed_onchain",
+        }),
+      }),
+    );
+    expect(result).toEqual({
+      state: "failed",
+      decision: "failed_onchain",
+      response: {
+        error: "failed_onchain",
+        signal_id: "44444444-4444-4444-8444-444444444444",
+        signature: expect.any(String),
+      },
+    });
+  });
+
+  it("marks RPC submission errors after signing as uncertain with the transaction signature", async () => {
+    const { executeSignalWithDependencies } = await import("../src/executor/index.js");
+    const wallet = await generateKeyPairSigner();
+
+    const result = await executeSignalWithDependencies(
+      {
+        signalId: "55555555-5555-4555-8555-555555555555",
+        tokenMint: "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",
+        amountSol: 0.01,
+        maxSlippageBps: 300,
+      },
+      {
+        wallet,
+        now: vi.fn().mockReturnValue(1_000),
+        sleep: vi.fn().mockResolvedValue(undefined),
+        quoteClient: {
+          getQuote: vi.fn().mockResolvedValue(makeQuote()),
+          getSwapInstructions: vi.fn().mockResolvedValue(makeSwapInstructions()),
+        },
+        connection: {
+          getLatestBlockhash: vi.fn().mockResolvedValue({
+            blockhash: "11111111111111111111111111111111",
+            lastValidBlockHeight: 55,
+          }),
+          fetchLookupTableAddresses: vi.fn().mockResolvedValue({}),
+          sendTransaction: vi.fn().mockRejectedValue(new Error("rpc timeout")),
+          getSignatureStatuses: vi.fn(),
+          getBlockHeight: vi.fn(),
+        },
+      },
+    );
+
+    expect(upsertTrade).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({
+          state: "uncertain",
+          signature: expect.any(String),
+          errorMsg: "rpc timeout",
+        }),
+      }),
+    );
+    expect(result).toEqual({
+      state: "failed",
+      decision: "uncertain",
+      response: {
+        error: "uncertain",
+        signal_id: "55555555-5555-4555-8555-555555555555",
+        signature: expect.any(String),
       },
     });
   });

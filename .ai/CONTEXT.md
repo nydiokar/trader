@@ -51,6 +51,7 @@ M3 now includes:
 - [x] executor/runtime ported from legacy `@solana/web3.js` usage to `@solana/kit`
 - [x] trade persistence on terminal executor outcomes via `trades`
 - [x] deterministic executor tests for confirmed and expired outcomes
+- [x] deterministic executor tests for pre-submit failure, failed-onchain, and post-signing uncertain outcomes
 - [x] explicit gated live devnet swap harness in `tests/executor.devnet.live.test.ts`
 - [x] local devnet wallet bootstrap helper in `src/solana/devnet-wallet.ts`
 - [x] local devnet wallet status helper in `src/solana/devnet-status.ts`
@@ -133,11 +134,12 @@ Retry contract for the upstream sender:
 ## Current Operating Reality
 
 - `pnpm build` passes.
-- `pnpm test` passes with 16 deterministic tests; guarded live Jupiter and guarded live devnet swap tests remain opt-in.
+- `pnpm test` passes with 19 deterministic tests; guarded live Jupiter and guarded live devnet swap tests remain opt-in.
 - `pnpm test` now includes deterministic mock coverage for Jupiter plus opt-in live paths gated by `RUN_LIVE_JUPITER_TESTS=true` and `RUN_DEVNET_SWAP_TESTS=true`.
 - The codebase now has an actual M1 ingress gate in `src/webhook/ingress.ts`, not just endpoint scaffolding.
 - `src/executor/jupiter.ts` is implemented and live-validated for quote and swap-instructions fetching.
 - `src/executor/index.ts` now performs a real RPC-only execution path using `@solana/kit` and writes terminal trade rows.
+- Executor error mapping now distinguishes no-signature pre-submit failures (`pre_submit_failed`) from post-signing/submission uncertainty and confirmed on-chain failures (`failed_onchain`).
 - Risk blockers, tripwires, and Telegram delivery remain stubbed for later milestones.
 - `/healthz` still reports `rpc: "unchecked"`; full RPC health behavior is deferred until execution plumbing exists.
 

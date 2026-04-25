@@ -39,7 +39,7 @@ model Trade {
   amountSolIn     Float   @map("amount_sol_in")
   amountOutActual Float?  @map("amount_out_actual")
   signature       String?
-  state           String  // confirmed | failed_onchain | expired | uncertain
+  state           String  // confirmed | failed_onchain | expired | uncertain | pre_submit_failed
   submittedVia    String? @map("submitted_via") // jito | rpc
   dryRun          Boolean @default(false) @map("dry_run")
   slippageActual  Float?  @map("slippage_actual")

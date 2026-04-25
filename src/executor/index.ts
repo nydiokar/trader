@@ -34,7 +34,12 @@ const FIXED_PRIORITY_FEE_MICROLAMPORTS = 5_000n;
 const CONFIRM_TIMEOUT_MS = 45_000;
 const CONFIRM_POLL_INTERVAL_MS = 1_500;
 
-type ExecutionOutcome = "confirmed" | "failed_onchain" | "expired" | "uncertain";
+type ExecutionOutcome =
+  | "confirmed"
+  | "failed_onchain"
+  | "expired"
+  | "uncertain"
+  | "pre_submit_failed";
 
 type QuoteClient = {
   getQuote(tokenMint: string, amountSol: number, maxSlippageBps: number): Promise<QuoteResponse>;
@@ -128,6 +133,8 @@ export async function executeSignalWithDependencies(
   const stopTimer = signalToConfirmSeconds.startTimer();
   const createdAt = Math.floor(deps.now() / 1000);
 
+  let signature: Signature | undefined;
+
   try {
     const quote = await deps.quoteClient.getQuote(
       input.tokenMint,
@@ -146,7 +153,8 @@ export async function executeSignalWithDependencies(
       swapInstructions,
     );
 
-    const signature = await deps.connection.sendTransaction(
+    signature = getSignatureFromTransaction(builtTransaction.transaction);
+    await deps.connection.sendTransaction(
       getBase64EncodedWireTransaction(builtTransaction.transaction),
       {
         skipPreflight: true,
@@ -193,20 +201,29 @@ export async function executeSignalWithDependencies(
   } catch (error) {
     stopTimer();
 
-    logger.error({ err: error, signal_id: input.signalId }, "executor failed before submission");
+    const outcome: Extract<ExecutionOutcome, "pre_submit_failed" | "uncertain"> =
+      signature ? "uncertain" : "pre_submit_failed";
+
+    logger.error(
+      { err: error, signal_id: input.signalId, signature: signature?.toString() },
+      signature
+        ? "executor failed after submission"
+        : "executor failed before submission",
+    );
     await writeTrade(input, createdAt, deps.now(), {
-      signature: null,
-      state: "uncertain",
+      signature: signature?.toString() ?? null,
+      state: outcome,
       submittedVia: "rpc",
       errorMsg: error instanceof Error ? error.message : "unknown executor error",
     });
 
     return {
       state: "failed",
-      decision: "executor_error",
+      decision: outcome,
       response: {
-        error: "executor_error",
+        error: outcome,
         signal_id: input.signalId,
+        ...(signature ? { signature: signature.toString() } : {}),
       },
     };
   }
