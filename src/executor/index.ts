@@ -23,6 +23,7 @@ import { db } from "../db/index.js";
 import { logger } from "../logger.js";
 import {
   signalToConfirmSeconds,
+  submitToConfirmSeconds,
   tradesConfirmed,
   tradesSubmitted,
 } from "../metrics/registry.js";
@@ -163,13 +164,19 @@ export async function executeSignalWithDependencies(
     );
     tradesSubmitted.inc({ path: "rpc" });
 
-    const outcome = await pollForConfirmation(
-      deps.connection,
-      signature,
-      builtTransaction.lastValidBlockHeight,
-      deps.sleep,
-      deps.now,
-    );
+    const stopSubmitTimer = submitToConfirmSeconds.startTimer();
+    let outcome: ExecutionOutcome;
+    try {
+      outcome = await pollForConfirmation(
+        deps.connection,
+        signature,
+        builtTransaction.lastValidBlockHeight,
+        deps.sleep,
+        deps.now,
+      );
+    } finally {
+      stopSubmitTimer();
+    }
 
     await writeTrade(input, createdAt, deps.now(), toPersistedTrade(outcome, signature));
 

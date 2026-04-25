@@ -56,6 +56,7 @@ M3 now includes:
 - [x] local devnet wallet bootstrap helper in `src/solana/devnet-wallet.ts`
 - [x] local devnet wallet status helper in `src/solana/devnet-status.ts`
 - [x] `/healthz` checks DB, Solana RPC, and wallet balance with deterministic route coverage
+- [x] executor records `submit_to_confirm_seconds` around RPC confirmation polling
 - [ ] fund devnet wallet
 - [ ] identify/confirm a Jupiter-routable devnet mint/path
 - [ ] repeated live devnet swap validation to prove landing rate against the acceptance target
@@ -141,6 +142,7 @@ Retry contract for the upstream sender:
 - `src/executor/jupiter.ts` is implemented and live-validated for quote and swap-instructions fetching.
 - `src/executor/index.ts` now performs a real RPC-only execution path using `@solana/kit` and writes terminal trade rows.
 - Executor error mapping now distinguishes no-signature pre-submit failures (`pre_submit_failed`) from post-signing/submission uncertainty and confirmed on-chain failures (`failed_onchain`).
+- `submit_to_confirm_seconds` is populated for submitted RPC transactions; full metrics completion remains an M4 acceptance item.
 - Risk blockers, tripwires, and Telegram delivery remain stubbed for later milestones.
 - `/healthz` reports DB status, Solana RPC status, wallet SOL balance, and kill switch state; DB or RPC failure returns `503`.
 
