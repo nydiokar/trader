@@ -51,6 +51,11 @@ async function makeApp(options?: {
     response: unknown;
   }>;
   healthCheck?: () => Promise<{ rpcOk: boolean; walletSol: number }>;
+  blockerCheck?: (
+    signalId: string,
+    tokenMint: string,
+    amountSol: number,
+  ) => Promise<{ blocked: false } | { blocked: true; reason: string }>;
 }) {
   vi.resetModules();
 
@@ -62,6 +67,10 @@ async function makeApp(options?: {
   process.env["WEBHOOK_SECRET"] = "a".repeat(32);
   process.env["DATABASE_URL"] = `file:${dbPath}`;
   process.env["LOG_LEVEL"] = "fatal";
+  process.env["DAILY_SOL_CAP"] = "5";
+  process.env["PER_SIGNAL_SOL_CAP"] = "1";
+  process.env["PER_TOKEN_COOLDOWN_MINUTES"] = "30";
+  process.env["WALLET_SOL_FLOOR"] = "0.05";
 
   const sqlite = new Database(dbPath);
   sqlite.exec(migrationSql);
@@ -80,6 +89,7 @@ async function makeApp(options?: {
         response: { status: "queued", signal_id: payload.signal_id },
       })),
     healthCheck: options?.healthCheck,
+    blockerCheck: options?.blockerCheck ?? vi.fn().mockResolvedValue({ blocked: false }),
   });
 
   return {
@@ -165,6 +175,39 @@ describe("M1 webhook ingress", () => {
         rpc: "error",
         wallet_sol: 0,
         kill_switch: false,
+      });
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("rejects a signal when a pre-trade blocker fires", async () => {
+    const ctx = await makeApp({
+      blockerCheck: vi.fn().mockResolvedValue({
+        blocked: true,
+        reason: "per_signal_cap",
+      }),
+    });
+    try {
+      const body = JSON.stringify(buildPayload());
+      const timestamp = Math.floor(Date.now() / 1000);
+
+      const response = await ctx.app.inject({
+        method: "POST",
+        url: "/signal",
+        payload: body,
+        headers: {
+          "content-type": "application/json",
+          "x-timestamp": String(timestamp),
+          "x-signature": sign(process.env["WEBHOOK_SECRET"]!, timestamp, body),
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({
+        status: "rejected",
+        decision: "per_signal_cap",
+        signal_id: "11111111-1111-4111-8111-111111111111",
       });
     } finally {
       await ctx.cleanup();

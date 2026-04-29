@@ -1,6 +1,6 @@
 # Trader Bot - Project Context
 
-**Branch:** `main` | **Last Updated:** 2026-04-25 | **Status:** M0 complete. M1 complete. M2 complete. M3 executor path is wired on Solana Kit; gated devnet validation is pending.
+**Branch:** `main` | **Last Updated:** 2026-04-29 | **Status:** M0 complete. M1 complete. M2 complete. M3 complete. M4 is next.
 
 ---
 
@@ -29,7 +29,7 @@ Canonical spec: `solana-signal-bot-spec-v2.md`
 | M0 | Scaffold | 0.5 day | **Done** | Server starts locally, `/healthz` 200, SQLite DB created at `DB_PATH`, persists across restart |
 | M1 | Webhook ingress | 1 day | **Done** | HMAC auth, nonce, idempotency SM, rate-limit - 100% of spec tests pass |
 | M2 | Jupiter quote integration | 0.5 day | **Done** | Quotes for 5 mints end-to-end; mock + live tests pass |
-| M3 | Devnet full swap | 1 day | **In progress** | >= 28/30 devnet swaps land |
+| M3 | Devnet chain-path validation | 1 day | **Done** | Funded devnet wallet, health check green, safety gates enforced, and a cheap devnet transaction signs/submits/confirms |
 | M4 | Mainnet production executor | 3 days | **Not started** | >= 90% landing rate, p95 <= 15s, zero double-spends, all metrics populated |
 | M5 | Jito integration | 2 days | **Not started** | >= 95% landing rate, p95 <= 10s, fallback path tested, UNCERTAIN state proven safe |
 | M6 | Risk layer | 1 day | **Not started** | Every blocker has a test; kill switch verified in prod |
@@ -41,9 +41,9 @@ Canonical spec: `solana-signal-bot-spec-v2.md`
 
 ## Active Work
 
-### Current Priority: M3 - Devnet Full Swap Validation
+### Completed: M3 - Devnet Chain-Path Validation
 
-M2 is complete. The first real executor path is now wired, and the remaining M3 acceptance work is repeated live validation on devnet.
+M2 is complete. The first real executor path is wired. On 2026-04-29 we decided not to chase Jupiter-routable devnet liquidity because public Jupiter routing is mainnet-centered and creating a devnet mint plus AMM liquidity pool is not worth the complexity for this milestone. Devnet will be used for the parts it validates well: wallet funding, RPC health, signing, submission, confirmation polling, and failure-state behavior. Jupiter quote and swap-instruction validation remains mainnet read-only until tiny-money mainnet/canary validation.
 
 M3 now includes:
 - [x] executor wired from accepted signal -> quote -> swap instructions -> sign -> RPC submit -> confirm
@@ -57,9 +57,11 @@ M3 now includes:
 - [x] local devnet wallet status helper in `src/solana/devnet-status.ts`
 - [x] `/healthz` checks DB, Solana RPC, and wallet balance with deterministic route coverage
 - [x] executor records `submit_to_confirm_seconds` around RPC confirmation polling
-- [ ] fund devnet wallet
-- [ ] identify/confirm a Jupiter-routable devnet mint/path
-- [ ] repeated live devnet swap validation to prove landing rate against the acceptance target
+- [x] fund devnet wallet
+- [x] record decision to stop chasing Jupiter-routable devnet mint/path for M3
+- [x] enforce safety blockers before any more live behavior
+- [x] add a cheap devnet transaction harness that signs, submits, confirms, and reports a signature without relying on Jupiter liquidity
+- [x] run one cheap devnet chain-path validation transaction
 
 Recent M3 commits:
 - `cf0ee03` Wire M3 RPC executor path
@@ -73,7 +75,10 @@ Devnet wallet state:
   - `data/devnet-wallet.base58`
 - `pnpm devnet:status` reads the ignored wallet file and checks balance without printing the private key.
 - `pnpm devnet:airdrop` attempts configurable smaller airdrops using `DEVNET_AIRDROP_AMOUNTS_SOL` (default `1,0.5,0.3,0.2,0.1`) and `DEVNET_AIRDROP_COOLDOWN_MS` (default `30000`).
-- Current observed balance is `0` lamports.
+- Current observed balance is `0.89` SOL as of 2026-04-29.
+- `/healthz` returned `200` with `{"ok":true,"db":"ok","rpc":"ok","wallet_sol":0.89,"kill_switch":false}` on 2026-04-29.
+- `npm run devnet:transfer -- Fp1Y78jot1KzShEL3hrZY3RofYXkCznZ6sJ9tZMS6Zs3 0.001` confirmed on 2026-04-29 with signature `4vEMmSTxs6yDVVzArMsAX95eEB9DkkPn8jdi18bYKgH6PBs8HRJ5ZtfkCJpdvRUNXeV598cERVWs3BR9x5ZH1tLK`.
+- Post-transfer repo wallet balance was `0.888995` SOL.
 - Public devnet RPC airdrop via `https://api.devnet.solana.com` failed with JSON-RPC `-32603 Internal error`; funding still needs another faucet/RPC route or a transfer from a funded devnet wallet.
 - A smaller airdrop sequence was attempted on 2026-04-25: `1` SOL failed with `-32603`, then `0.5`, `0.3`, `0.2`, and `0.1` SOL failed with HTTP `429 Too Many Requests`.
 - A second paced attempt on 2026-04-25 used 30-second cooldowns for `0.1`, `0.05`, `0.02`, and `0.01` SOL; every request returned HTTP `429 Too Many Requests`.
@@ -143,7 +148,7 @@ Retry contract for the upstream sender:
 - `src/executor/index.ts` now performs a real RPC-only execution path using `@solana/kit` and writes terminal trade rows.
 - Executor error mapping now distinguishes no-signature pre-submit failures (`pre_submit_failed`) from post-signing/submission uncertainty and confirmed on-chain failures (`failed_onchain`).
 - `submit_to_confirm_seconds` is populated for submitted RPC transactions; full metrics completion remains an M4 acceptance item.
-- Risk blockers, tripwires, and Telegram delivery remain stubbed for later milestones.
+- Risk blockers were pulled forward before additional live validation because devnet SOL is scarce and the executor should not be able to drain the funded wallet by mistake. Tripwires and Telegram delivery remain later milestones.
 - `/healthz` reports DB status, Solana RPC status, wallet SOL balance, and kill switch state; DB or RPC failure returns `503`.
 
 ---
@@ -160,13 +165,13 @@ Retry contract for the upstream sender:
 | Local-first hosting | No platform lock-in before canary |
 | M1 ingress gate uses direct `better-sqlite3` statements | Needed to guarantee a literal `BEGIN IMMEDIATE` critical section for replay/race safety |
 | `@solana/kit` over direct legacy `@solana/web3.js` | Current Solana SDK direction; avoids growing new executor code on legacy APIs |
+| M3 no longer requires Jupiter devnet liquidity | Jupiter routing is mainnet-centered; devnet should validate wallet/RPC/sign/submit/confirm while Jupiter validation stays mainnet read-only or tiny-mainnet gated |
 
 ---
 
 ## Open Questions
 
-- How will the local devnet wallet be funded? Public devnet RPC airdrops failed with `-32603` and then `429`.
-- Is there a confirmed Jupiter-routable devnet mint/path for M3, or should M3 devnet validation prove the Kit/RPC transaction landing path while Jupiter swap validation remains mainnet-read/live or tiny-mainnet gated?
+- M4 implementation order: start with two-pass compute simulation, Helius priority fee integration, or post-trade reconciliation?
 
 ---
 

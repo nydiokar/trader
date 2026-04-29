@@ -1,9 +1,15 @@
 import type { FastifyInstance } from "fastify";
 import { db } from "../db/index.js";
 import { logger } from "../logger.js";
-import { register, signalsReceived, walletSolBalance } from "../metrics/registry.js";
+import {
+  register,
+  rejections,
+  signalsReceived,
+  walletSolBalance,
+} from "../metrics/registry.js";
 import { config } from "../config.js";
 import { executeSignal } from "../executor/index.js";
+import { runBlockers } from "../risk/index.js";
 import { getSolanaRpc, getTradingSigner } from "../solana/runtime.js";
 import { verifyHmac } from "./auth.js";
 import {
@@ -26,10 +32,19 @@ type SignalProcessor = (payload: {
 }>;
 
 type HealthCheck = () => Promise<{ rpcOk: boolean; walletSol: number }>;
+type BlockerCheck = (
+  signalId: string,
+  tokenMint: string,
+  amountSol: number,
+) => Promise<{ blocked: false } | { blocked: true; reason: string }>;
 
 export async function registerRoutes(
   app: FastifyInstance,
-  options?: { processSignal?: SignalProcessor; healthCheck?: HealthCheck },
+  options?: {
+    processSignal?: SignalProcessor;
+    healthCheck?: HealthCheck;
+    blockerCheck?: BlockerCheck;
+  },
 ): Promise<void> {
   const processSignal: SignalProcessor =
     options?.processSignal ??
@@ -41,6 +56,7 @@ export async function registerRoutes(
         payload.max_slippage_bps,
       ));
   const healthCheck = options?.healthCheck ?? checkSolanaHealth;
+  const blockerCheck = options?.blockerCheck ?? runBlockers;
 
   app.get("/healthz", async (_req, reply) => {
     let dbOk = false;
@@ -123,6 +139,32 @@ export async function registerRoutes(
     signalsReceived.inc({ result: "accepted" });
 
     try {
+      const blocker = await blockerCheck(
+        payload.signal_id,
+        payload.token_mint,
+        payload.amount_sol,
+      );
+
+      if (blocker.blocked) {
+        rejections.inc({ reason: blocker.reason });
+        const rejectionResponse = {
+          status: "rejected",
+          decision: blocker.reason,
+          signal_id: payload.signal_id,
+        };
+
+        completeSignal(
+          payload.signal_id,
+          "rejected",
+          blocker.reason,
+          rejectionResponse,
+          Math.floor(Date.now() / 1000),
+        );
+
+        const statusCode = blocker.reason === "kill_switch" ? 503 : 200;
+        return reply.code(statusCode).send(rejectionResponse);
+      }
+
       const result = await processSignal(payload);
 
       completeSignal(

@@ -708,7 +708,7 @@ JITO_TIP_LAMPORTS                # default 100000 (0.0001 SOL)
 
 # Webhook
 WEBHOOK_SECRET                   # HMAC key, min 32 bytes
-WEBHOOK_PORT                     # default 8080
+WEBHOOK_PORT                     # default 8089
 
 # Risk params
 DAILY_SOL_CAP                    # default 5
