@@ -1,6 +1,6 @@
 # Trader Bot - Project Context
 
-**Branch:** `main` | **Last Updated:** 2026-04-29 | **Status:** M0 complete. M1 complete. M2 complete. M3 complete. M4 is next.
+**Branch:** `main` | **Last Updated:** 2026-04-29 | **Status:** M0 complete. M1 complete. M2 complete. M3 complete. M4 in progress.
 
 ---
 
@@ -40,6 +40,34 @@ Canonical spec: `solana-signal-bot-spec-v2.md`
 ---
 
 ## Active Work
+
+### Planned: M4 - Mainnet Production Executor
+
+M4 task scaffold is recorded in `.ai/milestones/M4.md`. It decomposes the canonical M4 spec into handoff-safe work items:
+- lock deterministic tests before refactor
+- split executor modules along spec boundaries
+- add Helius priority fee client
+- add two-pass compute simulation
+- harden RPC-only submission and confirmation state machine
+- add post-trade reconciliation
+- add executor-level dry run
+- complete metrics verification
+- add guarded mainnet micro-trade harness
+- run and record live M4 acceptance evidence
+
+M4 remains RPC-only. Jito bundle submission and Jito fallback semantics are reserved for M5.
+
+M4 progress:
+- [x] adversarial review tightened the task scaffold to avoid over-prescribing module extraction or priority-fee transaction encoding
+- [x] added tested Helius priority fee client in `src/executor/priority_fee.ts`
+- [x] wired dynamic priority fees into executor transaction building
+- [x] added first-pass simulation and second-pass CU limit using `ceil(unitsConsumed * 1.15)`
+- [x] ignored Jupiter compute-budget instructions so bot-owned CU limit/price are authoritative
+- [x] add post-trade reconciliation using confirmed transaction token balance deltas
+- [x] add executor-level dry run
+- [x] complete metrics verification
+- [x] add guarded mainnet micro-trade harness
+- [ ] run live M4 acceptance evidence
 
 ### Completed: M3 - Devnet Chain-Path Validation
 
@@ -140,13 +168,19 @@ Retry contract for the upstream sender:
 
 ## Current Operating Reality
 
-- `pnpm build` passes.
-- `pnpm test` passes with 21 deterministic tests; guarded live Jupiter and guarded live devnet swap tests remain opt-in.
+- `npm run build` passes.
+- `pnpm test` passes with 45 deterministic tests and 3 skipped guarded live tests; guarded live Jupiter, guarded live devnet swap, and guarded live mainnet micro-trade tests remain opt-in.
 - `pnpm test` now includes deterministic mock coverage for Jupiter plus opt-in live paths gated by `RUN_LIVE_JUPITER_TESTS=true` and `RUN_DEVNET_SWAP_TESTS=true`.
 - The codebase now has an actual M1 ingress gate in `src/webhook/ingress.ts`, not just endpoint scaffolding.
 - `src/executor/jupiter.ts` is implemented and live-validated for quote and swap-instructions fetching.
 - `src/executor/index.ts` now performs a real RPC-only execution path using `@solana/kit` and writes terminal trade rows.
 - Executor error mapping now distinguishes no-signature pre-submit failures (`pre_submit_failed`) from post-signing/submission uncertainty and confirmed on-chain failures (`failed_onchain`).
+- Confirmed trades now run post-trade reconciliation before persistence: the executor fetches the confirmed transaction, parses wallet-owned token balance deltas for the target mint, and writes `trades.amount_out_actual`.
+- Reconciliation failures for missing confirmed transactions or missing/unparseable wallet token balances are explicit: the trade remains chain-state `confirmed`, `error_msg` records the reconciliation failure, and the executor response returns `decision: "reconciliation_failed"`.
+- `DRY_RUN=true` now runs the executor through quote, swap-instructions, ALT hydration, priority fee, simulation, build, and signing, then persists a synthetic confirmed dry-run trade without calling `sendTransaction`, confirmation polling, or reconciliation.
+- `/metrics` now exposes all M4-required metric families and initialized labels deterministically; the webhook integration tests assert the required names and gauges.
+- A guarded mainnet micro-trade harness exists at `tests/executor.mainnet.live.test.ts`. It is skipped unless `RUN_MAINNET_MICRO_TRADE_TESTS=true`, `DRY_RUN=false`, and `MAINNET_MICRO_TRADE_CONFIRM=I_UNDERSTAND_THIS_SPENDS_REAL_SOL`; it defaults to 0.001 SOL into USDC and enforces amount/floor caps.
+- M4 live acceptance evidence should be recorded in `.ai/milestones/M4-live-acceptance.md`.
 - `submit_to_confirm_seconds` is populated for submitted RPC transactions; full metrics completion remains an M4 acceptance item.
 - Risk blockers were pulled forward before additional live validation because devnet SOL is scarce and the executor should not be able to drain the funded wallet by mistake. Tripwires and Telegram delivery remain later milestones.
 - `/healthz` reports DB status, Solana RPC status, wallet SOL balance, and kill switch state; DB or RPC failure returns `503`.
@@ -171,7 +205,7 @@ Retry contract for the upstream sender:
 
 ## Open Questions
 
-- M4 implementation order: start with two-pass compute simulation, Helius priority fee integration, or post-trade reconciliation?
+- M4 remaining work requires operator action: run dry-run against mainnet config, run guarded mainnet micro-trades, collect landing-rate/p95/double-spend/metrics evidence, and decide whether M4 acceptance is met.
 
 ---
 

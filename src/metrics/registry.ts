@@ -71,3 +71,30 @@ export const killSwitchGauge = new Gauge({
   help: "Kill switch state (0=off 1=on)",
   registers: [register],
 });
+
+for (const result of ["accepted", "rejected", "replay", "auth_failed"] as const) {
+  signalsReceived.labels(result).inc(0);
+}
+
+for (const path of ["rpc", "jito"] as const) {
+  tradesSubmitted.labels(path).inc(0);
+}
+
+for (const result of ["confirmed", "failed_onchain", "expired", "uncertain"] as const) {
+  tradesConfirmed.labels(result).inc(0);
+}
+
+for (const reason of [
+  "kill_switch",
+  "per_signal_cap",
+  "daily_cap",
+  "cooldown",
+  "blocklist",
+  "insufficient_balance",
+] as const) {
+  rejections.labels(reason).inc(0);
+}
+
+walletSolBalance.set(0);
+dailySpendSol.set(0);
+killSwitchGauge.set(0);

@@ -181,6 +181,48 @@ describe("M1 webhook ingress", () => {
     }
   });
 
+  it("metrics endpoint exposes M4 metric families and labels", async () => {
+    const ctx = await makeApp({
+      healthCheck: vi.fn().mockResolvedValue({ rpcOk: true, walletSol: 1.25 }),
+    });
+    try {
+      await ctx.app.inject({
+        method: "GET",
+        url: "/healthz",
+      });
+
+      const response = await ctx.app.inject({
+        method: "GET",
+        url: "/metrics",
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.headers["content-type"]).toContain(
+        "text/plain; version=0.0.4",
+      );
+
+      const body = response.body;
+      expect(body).toContain("signals_received_total{result=\"accepted\"}");
+      expect(body).toContain("signals_received_total{result=\"rejected\"}");
+      expect(body).toContain("signals_received_total{result=\"replay\"}");
+      expect(body).toContain("signals_received_total{result=\"auth_failed\"}");
+      expect(body).toContain("trades_submitted_total{path=\"rpc\"}");
+      expect(body).toContain("trades_confirmed_total{result=\"confirmed\"}");
+      expect(body).toContain("trades_confirmed_total{result=\"failed_onchain\"}");
+      expect(body).toContain("trades_confirmed_total{result=\"expired\"}");
+      expect(body).toContain("trades_confirmed_total{result=\"uncertain\"}");
+      expect(body).toContain("rejections_total{reason=\"per_signal_cap\"}");
+      expect(body).toContain("signal_to_confirm_seconds_bucket");
+      expect(body).toContain("quote_latency_seconds_bucket");
+      expect(body).toContain("submit_to_confirm_seconds_bucket");
+      expect(body).toContain("wallet_sol_balance 1.25");
+      expect(body).toContain("daily_spend_sol 0");
+      expect(body).toContain("kill_switch 0");
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
   it("rejects a signal when a pre-trade blocker fires", async () => {
     const ctx = await makeApp({
       blockerCheck: vi.fn().mockResolvedValue({

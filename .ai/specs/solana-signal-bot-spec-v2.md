@@ -791,7 +791,7 @@ Each milestone ends with specific acceptance tests. A milestone is not "done" un
 - **Tests:**
   - Swap 0.01 devnet SOL for a devnet SPL token 30 times.
   - Measure success rate.
-- **Acceptance:** ≥ 28/30 land. Transactions visible on devnet explorer.
+- **Acceptance:** ≥ 28/30 land. Transactions visible on devnet explorer. (VERY HAD TO FIND DEVNET MINT SO WE TESTED SIGNATURE CONSTRUCTION ONLY TO A WALLET)
 
 ### M4 — Mainnet production executor (3 days — revised from v1)
 - Two-pass CU simulation.

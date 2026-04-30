@@ -3,6 +3,7 @@ import { db } from "../db/index.js";
 import { logger } from "../logger.js";
 import {
   register,
+  killSwitchGauge,
   rejections,
   signalsReceived,
   walletSolBalance,
@@ -80,6 +81,7 @@ export async function registerRoutes(
     }
 
     const killSwitch = config.KILL_SWITCH;
+    killSwitchGauge.set(killSwitch ? 1 : 0);
     const status = dbOk && rpcOk ? 200 : 503;
 
     return reply.code(status).send({
@@ -92,6 +94,7 @@ export async function registerRoutes(
   });
 
   app.get("/metrics", async (_req, reply) => {
+    killSwitchGauge.set(config.KILL_SWITCH ? 1 : 0);
     const metrics = await register.metrics();
     return reply.header("Content-Type", register.contentType).send(metrics);
   });
