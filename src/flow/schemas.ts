@@ -86,6 +86,18 @@ export const FlowPreparationOutputSchema = z.object({
   errors: z.array(z.unknown()).default([]),
 });
 
+export const FlowDryRunHttpEnvelopeSchema = z
+  .object({
+    schema_version: z.literal("flow_dry_run_v1"),
+    idempotency_key: z.string().min(1),
+    signal: FlowSignalArtifactSchema.optional(),
+    preparation: FlowPreparationOutputSchema.optional(),
+  })
+  .refine((value) => Boolean(value.signal) !== Boolean(value.preparation), {
+    message: "exactly one of signal or preparation is required",
+    path: ["signal"],
+  });
+
 export const FlowRiskConfigSchema = z.object({
   intended_size_sol: z.number().positive().default(0.01),
   max_position_size_sol: z.number().positive().default(0.02),
@@ -118,6 +130,7 @@ export const RiskCheckResultSchema = z.object({
 export const ExecutionJournalSchema = z.object({
   journal_id: z.string(),
   journal_path: z.string(),
+  idempotency_key: z.string().min(1).optional(),
   created_at: z.string().datetime(),
   signal: FlowSignalArtifactSchema,
   risk_config: FlowRiskConfigSchema,
@@ -131,6 +144,7 @@ export const ExecutionJournalSchema = z.object({
 });
 
 export type FlowSignalArtifact = z.infer<typeof FlowSignalArtifactSchema>;
+export type FlowDryRunHttpEnvelope = z.infer<typeof FlowDryRunHttpEnvelopeSchema>;
 export type FlowRiskConfig = z.infer<typeof FlowRiskConfigSchema>;
 export type RiskCheckResult = z.infer<typeof RiskCheckResultSchema>;
 export type ExecutionJournal = z.infer<typeof ExecutionJournalSchema>;

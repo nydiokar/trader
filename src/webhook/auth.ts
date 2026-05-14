@@ -13,6 +13,26 @@ export async function verifyHmac(
   request: FastifyRequest,
   reply: FastifyReply,
 ): Promise<void> {
+  await verifyHmacWithSecret(request, reply, config.WEBHOOK_SECRET);
+}
+
+export async function verifyFlowDryRunHmac(
+  request: FastifyRequest,
+  reply: FastifyReply,
+): Promise<void> {
+  if (!config.FLOW_DRY_RUN_WEBHOOK_SECRET) {
+    await reply.code(503).send({ error: "flow dry-run webhook auth is not configured" });
+    return;
+  }
+
+  await verifyHmacWithSecret(request, reply, config.FLOW_DRY_RUN_WEBHOOK_SECRET);
+}
+
+async function verifyHmacWithSecret(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  secret: string,
+): Promise<void> {
   const timestamp = request.headers["x-timestamp"];
   const signature = request.headers["x-signature"];
 
@@ -44,7 +64,7 @@ export async function verifyHmac(
 
   const rawBody = (request as RequestWithRawBody).rawBody ?? "";
   const signatureBase = `${timestamp}.${rawBody}`;
-  const expected = createHmac("sha256", config.WEBHOOK_SECRET)
+  const expected = createHmac("sha256", secret)
     .update(signatureBase)
     .digest("hex");
 

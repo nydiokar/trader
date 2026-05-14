@@ -1,6 +1,6 @@
 # Trader Bot - Project Context
 
-**Branch:** `main` | **Last Updated:** 2026-05-14 | **Status:** M0-M3 complete. M4-M5 core executor implemented with deterministic coverage; M6-M7 partially implemented; Flow-to-bot dry-run bridge Stage 1 complete; live/staging acceptance remains blocked.
+**Branch:** `main` | **Last Updated:** 2026-05-14 | **Status:** M0-M3 complete. M4-M5 core executor implemented with deterministic coverage; M6-M7 partially implemented; Flow-to-bot dry-run bridge Stage 1 complete and Stage 2/3 dry-run HTTP path implemented; live/staging acceptance remains blocked.
 
 ---
 
@@ -43,7 +43,7 @@ Canonical spec: `solana-signal-bot-spec-v2.md`
 
 ### Active: Flow-to-Bot Integration
 
-Goal: materialize a safe structured bridge from the existing Flow signal pipeline into this trader bot, starting with dry-run and progressing toward controlled live execution. Stage 1 is complete: the bot consumes the structured signal behind the Telegram branch, applies deterministic bot-side execution risk checks, writes either a dry-run order intent or exact reject reason, and persists one durable execution journal JSON.
+Goal: materialize a safe structured bridge from the existing Flow signal pipeline into this trader bot, starting with dry-run and progressing toward controlled live execution. Stage 1 is complete: the bot consumes the structured signal behind the Telegram branch, applies deterministic bot-side execution risk checks, writes either a dry-run order intent or exact reject reason, and persists one durable execution journal JSON. Stage 2/3 now add a config-gated Flow `trader_bot` delivery sink and authenticated trader dry-run HTTP intake without changing live `/signal` execution.
 
 Planning details are recorded in `.ai/context/flow-to-bot-dry-run-bridge.md`.
 
@@ -84,29 +84,54 @@ Implemented trader files:
 - `src/flow/dry-run.ts`
 - `src/flow/dry-run-flow-signal.ts`
 - `tests/flow-dry-run.test.ts`
+- `tests/flow-dry-run-intake.test.ts`
 - `package.json` script `flow:dry-run`
 
-Stage 2 next tasks - Flow outbox sink in `C:/Users/Cicada38/Projects/tokens_ingest`:
-- [ ] Extend `SignalDeliverySink` in `src/delivery/outbox.ts` to include `trader_bot`.
-- [ ] Add trader bot delivery config, for example `TRADER_BOT_WEBHOOK_URL`, with delivery disabled unless configured.
-- [ ] Deliver structured `PreparationOutput` or normalized `FlowSignalArtifact`; do not parse Telegram text.
-- [ ] Use idempotency key `signal_delivery:trader_bot:<run_id>`.
-- [ ] Enqueue trader bot delivery beside existing signal delivery without changing Telegram/n8n behavior.
-- [ ] Add tests proving existing Telegram/n8n branch remains unchanged and trader bot delivery is idempotent.
-- [ ] Add Flow timeline events for queued, started, completed, and failed trader-bot delivery.
+Implemented Flow repo files:
+- `C:/Users/Cicada38/Projects/tokens_ingest/src/config.ts`
+- `C:/Users/Cicada38/Projects/tokens_ingest/src/delivery/outbox.ts`
+- `C:/Users/Cicada38/Projects/tokens_ingest/src/run-builder/service.ts`
+- `C:/Users/Cicada38/Projects/tokens_ingest/scripts/test/test-signal-delivery-outbox.ts`
 
-Stage 3 next tasks - trader bot dry-run HTTP intake:
-- [ ] Add `POST /flow/dry-run-signal`, separate from live `/signal`.
-- [ ] Accept Flow `PreparationOutput` or `FlowSignalArtifact`.
-- [ ] Authenticate the endpoint without reusing live trading semantics accidentally.
-- [ ] Persist ingress before risk checks.
-- [ ] Call `runFlowDryRun(...)` and return journal summary.
-- [ ] Keep `live_execution_enabled=false` hard-coded.
-- [ ] Test invalid payload, auth failure, accepted dry-run, rejected dry-run, duplicate signal behavior, and no executor/Jupiter/signing calls.
+Stage 2 progress - Flow outbox sink in `C:/Users/Cicada38/Projects/tokens_ingest`:
+- [x] Extended `SignalDeliverySink` in `src/delivery/outbox.ts` to include `trader_bot`.
+- [x] Added `TRADER_BOT_DELIVERY_ENABLED`, `TRADER_BOT_WEBHOOK_URL`, and optional `TRADER_BOT_WEBHOOK_SECRET`.
+- [x] Delivery remains disabled unless the enable flag, URL, and HMAC secret are configured.
+- [x] Trader delivery posts structured `PreparationOutput`, not Telegram text.
+- [x] Trader delivery wraps the preparation in HTTP contract envelope `schema_version=flow_dry_run_v1` plus `idempotency_key`.
+- [x] Uses idempotency key `signal_delivery:trader_bot:<run_id>`.
+- [x] Enqueues trader bot delivery beside existing n8n delivery via `selectSignalDeliverySinks(...)`.
+- [x] Preserves existing n8n sender behavior and direct fallback scope.
+- [x] Adds queued/started/completed/failed timeline coverage through existing signal delivery event types with `sink` in payload.
+- [x] `scripts/test/test-signal-delivery-outbox.ts` proves n8n idempotency still works, trader_bot idempotency works, and config gating selects the sink only when enabled and configured.
+
+Stage 3 progress - trader bot dry-run HTTP intake:
+- [x] Added `POST /flow/dry-run-signal`, separate from live `/signal`.
+- [x] Accepts Flow `PreparationOutput` or bot-native `FlowSignalArtifact`.
+- [x] Also accepts the explicit HTTP envelope `{ schema_version, idempotency_key, signal|preparation }`.
+- [x] Authenticates with separate `FLOW_DRY_RUN_WEBHOOK_SECRET` HMAC using the existing timestamp/signature format.
+- [x] Calls `runFlowDryRun(...)` and returns journal summary with `journal_id`, `journal_path`, `risk_decision`, `reject_reason`, and `live_execution_enabled`.
+- [x] Response includes `schema_version` and persisted `idempotency_key` when supplied by the HTTP contract or Flow delivery headers.
+- [x] Keeps `live_execution_enabled=false` hard-coded.
+- [x] Duplicate signal delivery returns the prior journal as `already_processed` and does not re-run risk.
+- [x] Concurrent duplicate signal delivery is guarded by an atomic per-signal file claim; in-flight duplicates return `already_processing` without rerunning risk.
+- [x] Existing corrupt/unparseable journals fail closed instead of being treated as missing.
+- [x] Persists received/accepted/rejected/duplicate/in-flight/invalid/processing-error intake attempts under `data/execution-journals/attempts/` while retaining the canonical per-signal journal JSON.
+- [x] Tests cover auth failure, invalid payload, accepted dry-run, Flow `PreparationOutput` simulated delivery, rejected dry-run, duplicate behavior, and no live `/signal` processor entry.
+- [x] Adversarial review follow-ups fixed: trader intake idempotency race, Flow enabled-without-secret retry loop, invalid-payload vs processing-error classification, and corrupt-journal reprocessing risk.
+
+Stage 2/3 verification evidence:
+- Trader `npm run build` passed on 2026-05-14.
+- Trader `npm test` passed on 2026-05-14 with `68 passed`, `3 skipped`.
+- Flow `npm run typecheck` passed on 2026-05-14.
+- Flow `npm run test:signal-delivery-outbox` passed on 2026-05-14 and covered n8n/trader_bot idempotency plus trader sink config gating.
+- Flow `npm run typecheck:scripts` remains blocked by pre-existing unrelated script errors, including `scripts/general/verify-trigger-parse.ts`, `scripts/one-time/check-db.ts`, and several evaluation/test scripts. Source typecheck and the focused signal-delivery smoke test passed.
+- Local simulated Flow-to-trader delivery is covered by `tests/flow-dry-run-intake.test.ts`, which posts a Flow `PreparationOutput` shape to `/flow/dry-run-signal` and receives an accepted dry-run journal summary with `live_execution_enabled=false`.
 
 Stage 4 next tasks - production pre-execution foundation:
 - [ ] Add DB-backed `execution_journal` records while preserving JSON export.
 - [ ] Add journal idempotency keyed by Flow signal/prepared snapshot ID.
+- [ ] Replace the Stage 3 file-claim idempotency guard with DB-backed atomic idempotency and stale-claim recovery.
 - [ ] Add replay tooling for recent Flow signals through bot risk.
 - [ ] Add bot-owned price/liquidity refresh before any live intent.
 - [ ] Wire bot alerts for accepted dry-run, rejected dry-run, and future execution uncertainty.

@@ -10,9 +10,19 @@ import {
 } from "../metrics/registry.js";
 import { config } from "../config.js";
 import { executeSignal } from "../executor/index.js";
+import {
+  claimFlowExecutionJournal,
+  extractFlowDryRunHttpPayload,
+  normalizeFlowSignal,
+  readExistingFlowExecutionJournal,
+  releaseFlowExecutionJournalClaim,
+  runFlowDryRun,
+  writeFlowDryRunAttempt,
+} from "../flow/dry-run.js";
+import type { ExecutionJournal, FlowRiskConfig, FlowSignalArtifact } from "../flow/schemas.js";
 import { runBlockers, runTripwires } from "../risk/index.js";
 import { getSolanaRpc, getTradingSigner } from "../solana/runtime.js";
-import { verifyHmac } from "./auth.js";
+import { verifyFlowDryRunHmac, verifyHmac } from "./auth.js";
 import {
   completeSignal,
   enterSignal,
@@ -41,6 +51,12 @@ type BlockerCheck = (
 type TripwireCheck = (
   tokenMint: string,
 ) => Promise<{ triggered: string[] }>;
+type FlowDryRunProcessor = (payload: {
+  rawSignal: unknown;
+  riskConfig?: Partial<FlowRiskConfig>;
+  journalDir: string;
+  now?: Date;
+}) => Promise<ExecutionJournal>;
 
 export async function registerRoutes(
   app: FastifyInstance,
@@ -49,6 +65,8 @@ export async function registerRoutes(
     healthCheck?: HealthCheck;
     blockerCheck?: BlockerCheck;
     tripwireCheck?: TripwireCheck;
+    flowDryRunProcessor?: FlowDryRunProcessor;
+    flowJournalDir?: string;
   },
 ): Promise<void> {
   const processSignal: SignalProcessor =
@@ -63,6 +81,8 @@ export async function registerRoutes(
   const healthCheck = options?.healthCheck ?? checkSolanaHealth;
   const blockerCheck = options?.blockerCheck ?? runBlockers;
   const tripwireCheck = options?.tripwireCheck ?? runTripwires;
+  const flowDryRunProcessor = options?.flowDryRunProcessor ?? runFlowDryRun;
+  const flowJournalDir = options?.flowJournalDir ?? config.FLOW_EXECUTION_JOURNAL_DIR;
 
   app.get("/healthz", async (_req, reply) => {
     let dbOk = false;
@@ -235,6 +255,140 @@ export async function registerRoutes(
       return reply.code(500).send(failureResponse);
     }
   });
+
+  app.post("/flow/dry-run-signal", async (request, reply) => {
+    await verifyFlowDryRunHmac(request, reply);
+    if (reply.sent) return;
+
+    const now = new Date();
+    const headerIdempotencyKey =
+      typeof request.headers["idempotency-key"] === "string"
+        ? request.headers["idempotency-key"]
+        : typeof request.headers["x-signal-delivery-key"] === "string"
+          ? request.headers["x-signal-delivery-key"]
+          : undefined;
+    let httpPayload: ReturnType<typeof extractFlowDryRunHttpPayload>;
+    let signal: FlowSignalArtifact;
+    try {
+      httpPayload = extractFlowDryRunHttpPayload(request.body, headerIdempotencyKey);
+      signal = normalizeFlowSignal(httpPayload.rawSignal);
+    } catch (error) {
+      logger.warn({ err: error, signal_id: null }, "flow dry-run intake rejected");
+      await writeFlowDryRunAttempt(flowJournalDir, {
+        status: "invalid_payload",
+        signal_id: "unknown",
+        idempotency_key: headerIdempotencyKey,
+        error: error instanceof Error ? error.message : String(error),
+        live_execution_enabled: false,
+        created_at: now.toISOString(),
+      });
+      return reply.code(400).send({
+        error: "invalid flow payload",
+        signal_id: null,
+        live_execution_enabled: false,
+      });
+    }
+    const signalId = signal.signal_id;
+    let claim: Awaited<ReturnType<typeof claimFlowExecutionJournal>> | null = null;
+
+    try {
+      const existing = await readExistingFlowExecutionJournal(flowJournalDir, signal.signal_id);
+      if (existing) {
+        const response = buildFlowDryRunResponse("already_processed", existing);
+        await writeFlowDryRunAttempt(flowJournalDir, {
+          ...response,
+          idempotency_key: httpPayload.idempotencyKey,
+          created_at: now.toISOString(),
+        });
+        return reply.code(200).send(response);
+      }
+
+      claim = await claimFlowExecutionJournal(flowJournalDir, signal.signal_id, now);
+      if (!claim.claimed) {
+        const prior = await readExistingFlowExecutionJournal(flowJournalDir, signal.signal_id);
+        if (prior) {
+          const response = buildFlowDryRunResponse("already_processed", prior);
+          await writeFlowDryRunAttempt(flowJournalDir, {
+            ...response,
+            idempotency_key: httpPayload.idempotencyKey,
+            created_at: now.toISOString(),
+          });
+          return reply.code(200).send(response);
+        }
+
+        const response = {
+          status: "already_processing",
+          signal_id: signal.signal_id,
+          schema_version: httpPayload.schemaVersion,
+          idempotency_key: httpPayload.idempotencyKey,
+          live_execution_enabled: false,
+        };
+        await writeFlowDryRunAttempt(flowJournalDir, {
+          ...response,
+          created_at: now.toISOString(),
+        });
+        return reply.code(202).send(response);
+      }
+
+      await writeFlowDryRunAttempt(flowJournalDir, {
+        status: "flow_dry_run_received",
+        signal_id: signal.signal_id,
+        schema_version: httpPayload.schemaVersion,
+        idempotency_key: httpPayload.idempotencyKey,
+        token_mint: signal.token_mint,
+        live_execution_enabled: false,
+        created_at: now.toISOString(),
+      });
+
+      const journal = await flowDryRunProcessor({
+        rawSignal: httpPayload.rawSignal,
+        idempotencyKey: httpPayload.idempotencyKey,
+        journalDir: flowJournalDir,
+        now,
+      });
+      const status =
+        journal.risk_decision === "accepted" ? "dry_run_accepted" : "dry_run_rejected";
+      return reply.code(200).send(buildFlowDryRunResponse(status, journal));
+    } catch (error) {
+      logger.error({ err: error, signal_id: signalId }, "flow dry-run intake failed");
+      await writeFlowDryRunAttempt(flowJournalDir, {
+        status: "processing_error",
+        signal_id: signalId,
+        schema_version: httpPayload.schemaVersion,
+        idempotency_key: httpPayload.idempotencyKey,
+        error: error instanceof Error ? error.message : String(error),
+        live_execution_enabled: false,
+        created_at: now.toISOString(),
+      });
+      return reply.code(500).send({
+        error: "flow dry-run processing failed",
+        signal_id: signalId,
+        live_execution_enabled: false,
+      });
+    } finally {
+      if (claim?.claimed) {
+        await releaseFlowExecutionJournalClaim(claim.lockPath);
+      }
+    }
+  });
+}
+
+function buildFlowDryRunResponse(
+  status: "dry_run_accepted" | "dry_run_rejected" | "already_processed",
+  journal: ExecutionJournal,
+) {
+  return {
+    schema_version: "flow_dry_run_v1",
+    status,
+    idempotency_key: journal.idempotency_key,
+    signal_id: journal.signal.signal_id,
+    journal_id: journal.journal_id,
+    journal_path: journal.journal_path,
+    risk_decision: journal.risk_decision,
+    reject_reason: journal.reject_reason,
+    live_execution_enabled: false,
+    dry_run_order: journal.dry_run_order,
+  };
 }
 
 async function checkSolanaHealth(): Promise<{ rpcOk: boolean; walletSol: number }> {

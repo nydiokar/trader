@@ -1,9 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import { z } from "zod";
 import {
   ExecutionJournalSchema,
+  FlowDryRunHttpEnvelopeSchema,
   FlowPreparationOutputSchema,
   FlowRiskConfigSchema,
   FlowSignalArtifactSchema,
@@ -15,9 +16,16 @@ import {
 
 export type BuildJournalInput = {
   rawSignal: unknown;
+  idempotencyKey?: string;
   riskConfig?: Partial<FlowRiskConfig>;
   journalDir: string;
   now?: Date;
+};
+
+export type FlowDryRunHttpPayload = {
+  schemaVersion: "flow_dry_run_v1";
+  idempotencyKey: string;
+  rawSignal: unknown;
 };
 
 type RiskDecision = {
@@ -37,7 +45,7 @@ export async function runFlowDryRun(input: BuildJournalInput): Promise<Execution
     ],
   });
   const risk = evaluateFlowRisk(signal, riskConfig, now);
-  const journalPath = path.join(input.journalDir, `${sanitizePathSegment(signal.signal_id)}.json`);
+  const journalPath = getFlowExecutionJournalPath(input.journalDir, signal.signal_id);
   const dryRunOrder =
     risk.decision === "accepted"
       ? {
@@ -55,6 +63,7 @@ export async function runFlowDryRun(input: BuildJournalInput): Promise<Execution
   const journal = ExecutionJournalSchema.parse({
     journal_id: createJournalId(signal.signal_id, now),
     journal_path: journalPath,
+    idempotency_key: input.idempotencyKey,
     created_at: now.toISOString(),
     signal,
     risk_config: riskConfig,
@@ -69,7 +78,115 @@ export async function runFlowDryRun(input: BuildJournalInput): Promise<Execution
 
   await mkdir(input.journalDir, { recursive: true });
   await writeFile(journalPath, `${JSON.stringify(journal, null, 2)}\n`, "utf8");
+  await writeFlowDryRunAttempt(input.journalDir, {
+    status: risk.decision === "accepted" ? "dry_run_accepted" : "dry_run_rejected",
+    signal_id: signal.signal_id,
+    idempotency_key: input.idempotencyKey,
+    journal_id: journal.journal_id,
+    journal_path: journal.journal_path,
+    risk_decision: journal.risk_decision,
+    reject_reason: journal.reject_reason,
+    live_execution_enabled: false,
+    created_at: now.toISOString(),
+  });
   return journal;
+}
+
+export function extractFlowDryRunHttpPayload(
+  rawBody: unknown,
+  headerIdempotencyKey?: string,
+): FlowDryRunHttpPayload {
+  const envelope = FlowDryRunHttpEnvelopeSchema.safeParse(rawBody);
+  if (envelope.success) {
+    return {
+      schemaVersion: envelope.data.schema_version,
+      idempotencyKey: envelope.data.idempotency_key,
+      rawSignal: envelope.data.signal ?? envelope.data.preparation,
+    };
+  }
+
+  const signal = normalizeFlowSignal(rawBody);
+  return {
+    schemaVersion: "flow_dry_run_v1",
+    idempotencyKey: headerIdempotencyKey ?? `flow_dry_run:${signal.signal_id}`,
+    rawSignal: rawBody,
+  };
+}
+
+export function getFlowExecutionJournalPath(journalDir: string, signalId: string): string {
+  return path.join(journalDir, `${sanitizePathSegment(signalId)}.json`);
+}
+
+export function getFlowExecutionLockPath(journalDir: string, signalId: string): string {
+  return path.join(journalDir, "locks", `${sanitizePathSegment(signalId)}.lock`);
+}
+
+export async function claimFlowExecutionJournal(
+  journalDir: string,
+  signalId: string,
+  now: Date = new Date(),
+): Promise<{ claimed: true; lockPath: string } | { claimed: false; lockPath: string }> {
+  const lockPath = getFlowExecutionLockPath(journalDir, signalId);
+  await mkdir(path.dirname(lockPath), { recursive: true });
+
+  try {
+    const handle = await open(lockPath, "wx");
+    await handle.writeFile(
+      `${JSON.stringify({ signal_id: signalId, claimed_at: now.toISOString() })}\n`,
+      "utf8",
+    );
+    await handle.close();
+    return { claimed: true, lockPath };
+  } catch (error) {
+    if (isNodeError(error) && error.code === "EEXIST") {
+      return { claimed: false, lockPath };
+    }
+    throw error;
+  }
+}
+
+export async function releaseFlowExecutionJournalClaim(lockPath: string): Promise<void> {
+  await rm(lockPath, { force: true });
+}
+
+export async function readExistingFlowExecutionJournal(
+  journalDir: string,
+  signalId: string,
+): Promise<ExecutionJournal | null> {
+  const journalPath = getFlowExecutionJournalPath(journalDir, signalId);
+  try {
+    const raw = await readJsonFile(journalPath);
+    return ExecutionJournalSchema.parse(raw);
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") {
+      return null;
+    }
+    throw new Error(`existing Flow execution journal is unreadable: ${journalPath}`, {
+      cause: error,
+    });
+  }
+}
+
+export async function writeFlowDryRunAttempt(
+  journalDir: string,
+  attempt: Record<string, unknown>,
+): Promise<string> {
+  const attemptsDir = path.join(journalDir, "attempts");
+  await mkdir(attemptsDir, { recursive: true });
+  const signalId =
+    typeof attempt["signal_id"] === "string" ? attempt["signal_id"] : "unknown-signal";
+  const createdAt =
+    typeof attempt["created_at"] === "string" ? attempt["created_at"] : new Date().toISOString();
+  const suffix = createHash("sha256")
+    .update(`${createdAt}:${randomUUID()}`)
+    .digest("hex")
+    .slice(0, 8);
+  const attemptPath = path.join(
+    attemptsDir,
+    `${sanitizePathSegment(signalId)}.${createdAt.replace(/[^0-9A-Za-z.-]/g, "_")}.${suffix}.json`,
+  );
+  await writeFile(attemptPath, `${JSON.stringify(attempt, null, 2)}\n`, "utf8");
+  return attemptPath;
 }
 
 export function normalizeFlowSignal(rawSignal: unknown): FlowSignalArtifact {
@@ -224,4 +341,8 @@ function createJournalId(signalId: string, now: Date): string {
 
 function sanitizePathSegment(value: string): string {
   return value.replace(/[^a-zA-Z0-9._-]/g, "_");
+}
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error;
 }

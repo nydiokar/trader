@@ -30,6 +30,8 @@ const ConfigSchema = z.object({
   // Webhook
   WEBHOOK_SECRET: z.string().min(32),
   WEBHOOK_PORT: z.coerce.number().int().positive().default(8089),
+  FLOW_DRY_RUN_WEBHOOK_SECRET: z.string().min(32).optional(),
+  FLOW_EXECUTION_JOURNAL_DIR: z.string().default("data/execution-journals"),
 
   // Risk
   DAILY_SOL_CAP: z.coerce.number().positive().default(5),
