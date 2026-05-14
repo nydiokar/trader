@@ -1,6 +1,6 @@
 # Trader Bot - Project Context
 
-**Branch:** `main` | **Last Updated:** 2026-05-05 | **Status:** M0-M3 complete. M4-M5 core executor implemented with deterministic coverage; M6-M7 partially implemented; live/staging acceptance remains blocked.
+**Branch:** `main` | **Last Updated:** 2026-05-14 | **Status:** M0-M3 complete. M4-M5 core executor implemented with deterministic coverage; M6-M7 partially implemented; Flow-to-bot dry-run bridge Stage 1 complete; live/staging acceptance remains blocked.
 
 ---
 
@@ -40,6 +40,99 @@ Canonical spec: `solana-signal-bot-spec-v2.md`
 ---
 
 ## Active Work
+
+### Active: Flow-to-Bot Integration
+
+Goal: materialize a safe structured bridge from the existing Flow signal pipeline into this trader bot, starting with dry-run and progressing toward controlled live execution. Stage 1 is complete: the bot consumes the structured signal behind the Telegram branch, applies deterministic bot-side execution risk checks, writes either a dry-run order intent or exact reject reason, and persists one durable execution journal JSON.
+
+Planning details are recorded in `.ai/context/flow-to-bot-dry-run-bridge.md`.
+
+Architecture alignment:
+- Flow Telegram messages are a branch from structured `PreparationOutput`; Telegram text is not the bot integration layer.
+- The bot should consume a stable Flow signal artifact derived from `PreparationOutput` / `signal_delivery_outbox`.
+- Flow repo cross-reference: `C:/Users/Cicada38/Projects/tokens_ingest`; key files are `src/contracts/preparation.ts`, `src/delivery/outbox.ts`, `src/api/routes/signal.ts`, `src/run-builder/service.ts`, and `src/db/schema.ts`.
+- Trader repo key files are `src/flow/*`, `src/webhook/routes.ts`, `src/executor/index.ts`, `src/db/index.ts`, and `prisma/schema.prisma`.
+- Stage 1 is file-based and bot-local: `FlowSignalArtifact` JSON in, execution journal JSON out.
+- Stage 2 should add a `trader_bot` sink to Flow's signal delivery outbox beside Telegram/n8n delivery.
+- Stage 3 should add bot HTTP intake after the artifact contract and journal behavior are proven.
+- Stage 4 can promote journals to DB and allow selected accepted intents to call the existing executor behind explicit live toggles.
+
+Target production architecture:
+- Flow remains the alpha/signal generator.
+- Telegram remains a human notification branch.
+- Trader receives structured Flow payloads through a durable `trader_bot` delivery sink.
+- Trader owns all capital/execution risk decisions, live execution toggles, position state, kill switch, and chain reconciliation.
+- Trader persists every accepted/rejected/deduped Flow decision in `execution_journal`.
+- Live execution promotion must be bot-owned and cannot be enabled by Flow payload fields.
+
+Stage 1 implementation checklist:
+- [x] Define Flow artifact and execution journal schemas.
+- [x] Add deterministic risk checks for max position size, max wallet exposure, missing price data, missing liquidity data, signal staleness, already-seen token, and open token position.
+- [x] Add dry-run-only order intent with `live_execution_enabled=false`.
+- [x] Add CLI to read one Flow artifact JSON and write `data/execution-journals/<signal_id>.json`.
+- [x] Add deterministic tests for accepted and rejected bridge paths.
+- [x] Run once against one real recent/current Flow artifact and export the generated execution journal JSON.
+
+Stage 1 evidence:
+- Source Flow outbox row: `signal_delivery_outbox.id=56724c07-ad45-4414-8ec4-025e9a9ae826`, `run_id=edf1c8ad-0619-4b0f-aaeb-fee0b927df41`, `signal_id=14b79788-a089-4f25-ab81-19e0fa0d6692`, created `2026-05-14T10:39:33.217Z`.
+- Exported Flow preparation artifact: `data/flow-artifacts/edf1c8ad-0619-4b0f-aaeb-fee0b927df41.preparation.json`.
+- Generated execution journal: `data/execution-journals/14b79788-a089-4f25-ab81-19e0fa0d6692.json`.
+- Journal result: `risk_decision=accepted`, `reject_reason=null`, `live_execution_enabled=false`, dry-run buy intent for `0.01` SOL with `flow_default_v1` exit label.
+
+Implemented trader files:
+- `src/flow/schemas.ts`
+- `src/flow/dry-run.ts`
+- `src/flow/dry-run-flow-signal.ts`
+- `tests/flow-dry-run.test.ts`
+- `package.json` script `flow:dry-run`
+
+Stage 2 next tasks - Flow outbox sink in `C:/Users/Cicada38/Projects/tokens_ingest`:
+- [ ] Extend `SignalDeliverySink` in `src/delivery/outbox.ts` to include `trader_bot`.
+- [ ] Add trader bot delivery config, for example `TRADER_BOT_WEBHOOK_URL`, with delivery disabled unless configured.
+- [ ] Deliver structured `PreparationOutput` or normalized `FlowSignalArtifact`; do not parse Telegram text.
+- [ ] Use idempotency key `signal_delivery:trader_bot:<run_id>`.
+- [ ] Enqueue trader bot delivery beside existing signal delivery without changing Telegram/n8n behavior.
+- [ ] Add tests proving existing Telegram/n8n branch remains unchanged and trader bot delivery is idempotent.
+- [ ] Add Flow timeline events for queued, started, completed, and failed trader-bot delivery.
+
+Stage 3 next tasks - trader bot dry-run HTTP intake:
+- [ ] Add `POST /flow/dry-run-signal`, separate from live `/signal`.
+- [ ] Accept Flow `PreparationOutput` or `FlowSignalArtifact`.
+- [ ] Authenticate the endpoint without reusing live trading semantics accidentally.
+- [ ] Persist ingress before risk checks.
+- [ ] Call `runFlowDryRun(...)` and return journal summary.
+- [ ] Keep `live_execution_enabled=false` hard-coded.
+- [ ] Test invalid payload, auth failure, accepted dry-run, rejected dry-run, duplicate signal behavior, and no executor/Jupiter/signing calls.
+
+Stage 4 next tasks - production pre-execution foundation:
+- [ ] Add DB-backed `execution_journal` records while preserving JSON export.
+- [ ] Add journal idempotency keyed by Flow signal/prepared snapshot ID.
+- [ ] Add replay tooling for recent Flow signals through bot risk.
+- [ ] Add bot-owned price/liquidity refresh before any live intent.
+- [ ] Wire bot alerts for accepted dry-run, rejected dry-run, and future execution uncertainty.
+- [ ] Add open-position state; stop relying only on prior journal/trade scan.
+- [ ] Define live execution promotion gates requiring bot config `live_execution_enabled=true`, `DRY_RUN=false`, kill switch off, wallet floor, fresh signal, and unused idempotency.
+- [ ] Only after those gates, map accepted dry-run order intent into the existing executor shape.
+
+Integration complete definition of done:
+- [ ] Flow has a config-gated `trader_bot` sink beside Telegram/n8n.
+- [ ] Trader has authenticated dry-run HTTP intake for Flow payloads.
+- [ ] Trader DB has execution journal idempotency by Flow signal/prepared snapshot ID.
+- [ ] Duplicate Flow deliveries return prior journal result without reprocessing.
+- [ ] Accepted dry-runs cannot submit transactions.
+- [ ] Rejected dry-runs persist exact reasons.
+- [ ] Metrics and alerts cover accepted/rejected/duplicate/error/live-disabled outcomes.
+- [ ] Replay tooling can run recent Flow signals through bot risk.
+- [ ] Live promotion requires bot-owned config plus all safety gates.
+- [ ] Live promoted trades reuse current executor and reconcile journal/trade state against chain data.
+- [ ] Canary evidence is recorded before raising size.
+
+Hard constraints:
+- Do not parse Telegram messages as bot input.
+- Do not change Flow gates, triggers, scoring, exit rules, synthesis, analysis, or Telegram behavior.
+- Do not call Jupiter, sign transactions, or submit transactions in the Flow dry-run bridge.
+- Persist every bridge attempt, including rejects.
+- Keep execution/capital risk checks in the bot, separate from Flow alpha/gating logic.
 
 ### Planned: M4 - Mainnet Production Executor
 
