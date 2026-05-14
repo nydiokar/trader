@@ -1,8 +1,8 @@
 # M4 Live Acceptance Evidence
 
-Status: Not run
-Date:
-Operator:
+Status: Blocked - real mainnet wallet live tests not possible; deterministic, Jito state-machine, observability, risk, and devnet construction checks passed
+Date: 2026-05-05
+Operator: Codex
 Commit:
 
 ## Preconditions
@@ -23,7 +23,7 @@ Commit:
 Deterministic suite:
 
 ```powershell
-npm run build
+pnpm build
 pnpm test
 ```
 
@@ -33,6 +33,12 @@ Dry run against mainnet config:
 $env:DRY_RUN="true"
 $env:RUN_MAINNET_MICRO_TRADE_TESTS="false"
 pnpm test -- tests/executor.test.ts
+```
+
+Devnet transaction construction without submission:
+
+```powershell
+pnpm devnet:transfer -- Fp1Y78jot1KzShEL3hrZY3RofYXkCznZ6sJ9tZMS6Zs3 0.000001 --dry-run
 ```
 
 Guarded live mainnet micro-trades:
@@ -56,19 +62,22 @@ Invoke-WebRequest http://127.0.0.1:8089/metrics
 
 ## Results
 
-- Deterministic build:
-- Deterministic tests:
-- Dry-run result:
-- Live iterations:
-- Confirmed:
-- Failed on-chain:
-- Expired:
-- Uncertain:
-- Landing rate:
-- p50 signal-to-confirm:
-- p95 signal-to-confirm:
-- Double-spend check:
-- Metrics snapshot captured:
+- Deterministic build: `pnpm build` passed on 2026-05-05.
+- Deterministic tests: `pnpm test` passed on 2026-05-05 with 58 passed and 3 skipped guarded live tests.
+- Devnet construction dry-run: passed on 2026-05-05 with no submission.
+- Devnet construction command: `pnpm devnet:transfer -- Fp1Y78jot1KzShEL3hrZY3RofYXkCznZ6sJ9tZMS6Zs3 0.000001 --dry-run`.
+- Latest constructed devnet dry-run signature: `2DvLDu1EHzi1euw2achfGNREaoXHTAjRH4TiKq7jDp1h4XYUbyVpqqjeVwAqGi6RzGyeAPqXAcs4muW1oqCoqMJV`.
+- Mainnet dry-run result: not run; real wallet/config unavailable.
+- Live iterations: 0; real wallet live tests unavailable.
+- Confirmed: not measured.
+- Failed on-chain: not measured.
+- Expired: not measured.
+- Uncertain: not measured.
+- Landing rate: not measured.
+- p50 signal-to-confirm: not measured.
+- p95 signal-to-confirm: not measured.
+- Double-spend check: not measured.
+- Metrics snapshot captured: not captured from a live M4 run.
 
 ## Signatures
 
@@ -82,5 +91,5 @@ Invoke-WebRequest http://127.0.0.1:8089/metrics
 - [ ] Zero double-spends.
 - [ ] All required metrics populated.
 
-Decision:
-Known caveats:
+Decision: M4-M7 live/staging acceptance is not complete because real-wallet mainnet and staging Telegram tests could not be run. Deterministic build/tests and devnet transaction construction are verified.
+Known caveats: No mainnet landing-rate, p95, double-spend, slippage, or live metrics evidence exists yet.

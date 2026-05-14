@@ -1,6 +1,6 @@
 # Trader Bot - Project Context
 
-**Branch:** `main` | **Last Updated:** 2026-04-29 | **Status:** M0 complete. M1 complete. M2 complete. M3 complete. M4 in progress.
+**Branch:** `main` | **Last Updated:** 2026-05-05 | **Status:** M0-M3 complete. M4-M5 core executor implemented with deterministic coverage; M6-M7 partially implemented; live/staging acceptance remains blocked.
 
 ---
 
@@ -30,10 +30,10 @@ Canonical spec: `solana-signal-bot-spec-v2.md`
 | M1 | Webhook ingress | 1 day | **Done** | HMAC auth, nonce, idempotency SM, rate-limit - 100% of spec tests pass |
 | M2 | Jupiter quote integration | 0.5 day | **Done** | Quotes for 5 mints end-to-end; mock + live tests pass |
 | M3 | Devnet chain-path validation | 1 day | **Done** | Funded devnet wallet, health check green, safety gates enforced, and a cheap devnet transaction signs/submits/confirms |
-| M4 | Mainnet production executor | 3 days | **Not started** | >= 90% landing rate, p95 <= 15s, zero double-spends, all metrics populated |
-| M5 | Jito integration | 2 days | **Not started** | >= 95% landing rate, p95 <= 10s, fallback path tested, UNCERTAIN state proven safe |
-| M6 | Risk layer | 1 day | **Not started** | Every blocker has a test; kill switch verified in prod |
-| M7 | Observability | 0.5 day | **Not started** | All Telegram event types verified in staging |
+| M4 | Mainnet production executor | 3 days | **In progress** | >= 90% landing rate, p95 <= 15s, zero double-spends, all metrics populated |
+| M5 | Jito integration | 2 days | **Implemented, live blocked** | >= 95% landing rate, p95 <= 10s, fallback path tested, UNCERTAIN state proven safe |
+| M6 | Risk layer | 1 day | **Partially implemented** | Every blocker has a test; kill switch verified in prod |
+| M7 | Observability | 0.5 day | **Partially implemented** | All Telegram event types verified in staging |
 | M8 | Canary period | 1 week calendar | **Not started** | 5-7 days live with tiny caps, no UNCERTAIN states, >= 95% landing |
 | M9 | Production size-up | Ongoing | **Not started** | One full week at target size with SLOs met |
 
@@ -67,7 +67,60 @@ M4 progress:
 - [x] add executor-level dry run
 - [x] complete metrics verification
 - [x] add guarded mainnet micro-trade harness
+- [x] confirm devnet transaction construction without submission
 - [ ] run live M4 acceptance evidence
+
+### Implemented Pending Live/Staging Evidence: M5-M7
+
+M5 Jito integration now includes:
+- [x] Jito tip transaction construction with the same blockhash as the swap transaction
+- [x] Block Engine `sendBundle` client
+- [x] Jito-first executor path when the default dependencies are used
+- [x] RPC fallback only for pre-acceptance `JitoSyncError`
+- [x] no RPC fallback after Jito acceptance, including terminal `uncertain`
+- [x] deterministic tests for accepted bundle, fallback, and accepted-then-uncertain behavior
+- [ ] 100 live Jito round trips and explorer double-spend diff
+
+M6 risk layer now includes:
+- [x] all hard blockers from spec section 4.1 with deterministic coverage
+- [x] runtime DB kill switch blocker
+- [x] advisory tripwire result aggregation for RugCheck risk, mint authority, freeze authority, and top-10 holder concentration
+- [x] `TRIPWIRES_AS_BLOCKERS=true` hard-reject path wired into `/signal`
+- [ ] real RugCheck API integration
+- [ ] real mint/freeze authority parsing
+- [ ] real Helius top-10 holder concentration integration
+- [ ] advisory tripwires persisted into `signals.result_json` on accepted trades
+- [ ] production kill-switch verification
+
+M7 observability now includes:
+- [x] Telegram posting helper
+- [x] formatted messages for confirmed, failed, rejected, uncertain, kill-switch, and low-wallet-balance events
+- [x] SLO alert evaluator for landing rate and p95 signal-to-confirm latency
+- [x] README note requiring a private, non-identifying Telegram channel/chat
+- [ ] Telegram notifications wired into executor/webhook event paths
+- [ ] SLO evaluator wired to a scheduler or metrics snapshot source
+- [ ] staging verification that every Telegram event arrives
+
+### Adversarial Review - 2026-05-05
+
+Spec comparison and adversarial review found these issues and blockers:
+
+- Fixed during review: local Jito tip-construction errors after swap signing but before any network submission were being classified as `uncertain`; this now remains `pre_submit_failed` unless a Jito/RPC submission was actually attempted.
+- Fixed during review: malformed Jito JSON responses are normalized into `JitoSyncError`, allowing the intended pre-acceptance RPC fallback instead of leaking as an ambiguous executor error.
+- Fixed during operational hardening: pre-submit signed-but-not-submitted failures no longer persist or return a transaction signature, so operators do not chase a transaction that was never sent.
+- Fixed during operational hardening: blockhash-expiry handling now waits before the final signature-status check, reducing false `expired` classification near the last valid slots.
+- Fixed during operational hardening: startup now validates wallet loading, wallet balance RPC, and latest blockhash RPC before binding the HTTP server.
+- Fixed during operational hardening: Jito tip account lookup is cached per process to avoid a per-trade Block Engine round trip before bundle submission.
+- Blocker: M4 and M5 live acceptance evidence is still absent. No real mainnet dry-run with production wallet, no 100 micro-trade run, no p50/p95, no landing rate, no explorer double-spend diff.
+- Blocker: default executor dependencies now use Jito first; this matches M5 direction but has not been canary-tested. Run only with tiny caps until live evidence exists.
+- Blocker: tripwire code currently aggregates injected advisory checks but does not fetch real RugCheck, mint/freeze authority, or holder concentration data.
+- Blocker: tripwire results are logged, and can block when `TRIPWIRES_AS_BLOCKERS=true`, but accepted-signal `result_json` does not yet persist `tripwires_triggered`.
+- Blocker: Telegram helpers exist but are not wired to actual trade confirmed/failed/rejected/uncertain/kill-switch/low-wallet-balance event paths.
+- Blocker: SLO alert evaluation exists but is not connected to rolling trade windows, Prometheus snapshots, a scheduler, or Telegram delivery.
+- Blocker: startup validation still does not execute Prisma migrations before accepting traffic; wallet load, RPC `getBalance`, and RPC `getLatestBlockhash` are now checked.
+- Nuance: priority-fee client supports transaction-aware estimates, but the executor currently calls it without a serialized transaction, so Helius estimates may be less precise than the spec's best-practice path.
+- Nuance: confirmation expiry final-check is immediate; the spec sketch sleeps before final status check. Current behavior is deterministic but could classify near-expiry late landings more aggressively than intended.
+- Nuance: `uncertain` is used as the DB state and metric label. The prose in spec section 3.7 says write DB state `unknown`, while other spec areas use `uncertain`; this should be resolved as a documented amendment before live canary.
 
 ### Completed: M3 - Devnet Chain-Path Validation
 
@@ -168,8 +221,8 @@ Retry contract for the upstream sender:
 
 ## Current Operating Reality
 
-- `npm run build` passes.
-- `pnpm test` passes with 45 deterministic tests and 3 skipped guarded live tests; guarded live Jupiter, guarded live devnet swap, and guarded live mainnet micro-trade tests remain opt-in.
+- `pnpm build` passes as of 2026-05-05.
+- `pnpm test` passes with 58 deterministic tests and 3 skipped guarded live tests as of 2026-05-05; guarded live Jupiter, guarded live devnet swap, and guarded live mainnet/Jito micro-trade tests remain opt-in.
 - `pnpm test` now includes deterministic mock coverage for Jupiter plus opt-in live paths gated by `RUN_LIVE_JUPITER_TESTS=true` and `RUN_DEVNET_SWAP_TESTS=true`.
 - The codebase now has an actual M1 ingress gate in `src/webhook/ingress.ts`, not just endpoint scaffolding.
 - `src/executor/jupiter.ts` is implemented and live-validated for quote and swap-instructions fetching.
@@ -180,6 +233,10 @@ Retry contract for the upstream sender:
 - `DRY_RUN=true` now runs the executor through quote, swap-instructions, ALT hydration, priority fee, simulation, build, and signing, then persists a synthetic confirmed dry-run trade without calling `sendTransaction`, confirmation polling, or reconciliation.
 - `/metrics` now exposes all M4-required metric families and initialized labels deterministically; the webhook integration tests assert the required names and gauges.
 - A guarded mainnet micro-trade harness exists at `tests/executor.mainnet.live.test.ts`. It is skipped unless `RUN_MAINNET_MICRO_TRADE_TESTS=true`, `DRY_RUN=false`, and `MAINNET_MICRO_TRADE_CONFIRM=I_UNDERSTAND_THIS_SPENDS_REAL_SOL`; it defaults to 0.001 SOL into USDC and enforces amount/floor caps.
+- Default executor dependencies now use the Jito bundle path. Deterministic tests prove RPC fallback is only used before Jito accepts a bundle and is not used after accepted bundle uncertainty.
+- Telegram and SLO helpers are deterministic-test covered, but they are not yet wired to runtime events and no staging Telegram delivery has been performed.
+- `src/solana/devnet-transfer.ts` supports `--dry-run`, which fetches a devnet blockhash, builds and signs a versioned SOL transfer, prints the signature and base64 wire transaction, and does not call `sendTransaction`.
+- Devnet transaction construction was confirmed on 2026-05-05 with `pnpm devnet:transfer -- Fp1Y78jot1KzShEL3hrZY3RofYXkCznZ6sJ9tZMS6Zs3 0.000001 --dry-run`; no devnet funds were moved. Latest constructed signature: `2DvLDu1EHzi1euw2achfGNREaoXHTAjRH4TiKq7jDp1h4XYUbyVpqqjeVwAqGi6RzGyeAPqXAcs4muW1oqCoqMJV`.
 - M4 live acceptance evidence should be recorded in `.ai/milestones/M4-live-acceptance.md`.
 - `submit_to_confirm_seconds` is populated for submitted RPC transactions; full metrics completion remains an M4 acceptance item.
 - Risk blockers were pulled forward before additional live validation because devnet SOL is scarce and the executor should not be able to drain the funded wallet by mistake. Tripwires and Telegram delivery remain later milestones.
@@ -205,7 +262,8 @@ Retry contract for the upstream sender:
 
 ## Open Questions
 
-- M4 remaining work requires operator action: run dry-run against mainnet config, run guarded mainnet micro-trades, collect landing-rate/p95/double-spend/metrics evidence, and decide whether M4 acceptance is met.
+- M4-M7 remaining work requires operator action with real mainnet/staging credentials: run dry-run against mainnet config, run guarded mainnet/Jito micro-trades, collect landing-rate/p95/double-spend/metrics evidence, verify kill switch in production, and verify Telegram delivery in staging. Live tests with real wallet were not possible on 2026-05-05.
+- M8 and M9 cannot be completed by code alone; they require 5-7 days of canary operation and subsequent production size-up evidence.
 
 ---
 

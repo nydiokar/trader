@@ -899,4 +899,276 @@ describe("M3 executor", () => {
       },
     });
   });
+
+  it("submits accepted Jito bundles without RPC fallback", async () => {
+    const { executeSignalWithDependencies } = await import("../src/executor/index.js");
+    const wallet = await generateKeyPairSigner();
+    const tipAccount = (await generateKeyPairSigner()).address;
+    const tokenMint = "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN";
+    const sendTransaction = vi.fn();
+    const submitBundle = vi.fn().mockResolvedValue("bundle-ok");
+
+    const result = await executeSignalWithDependencies(
+      {
+        signalId: "15151515-1515-4151-8151-151515151515",
+        tokenMint,
+        amountSol: 0.01,
+        maxSlippageBps: 300,
+      },
+      {
+        wallet,
+        now: vi.fn().mockReturnValue(1_000),
+        sleep: vi.fn().mockResolvedValue(undefined),
+        quoteClient: {
+          getQuote: vi.fn().mockResolvedValue(makeQuote()),
+          getSwapInstructions: vi.fn().mockResolvedValue(makeSwapInstructions()),
+        },
+        priorityFeeClient: {
+          getPriorityFeeEstimate: vi.fn().mockResolvedValue(12_345n),
+        },
+        jitoClient: {
+          getTipAccount: vi.fn().mockResolvedValue(tipAccount),
+          submitBundle,
+        },
+        jitoTipLamports: 100_000n,
+        connection: {
+          getLatestBlockhash: vi.fn().mockResolvedValue({
+            blockhash: "11111111111111111111111111111111",
+            lastValidBlockHeight: 55,
+          }),
+          fetchLookupTableAddresses: vi.fn().mockResolvedValue({}),
+          simulateTransaction: vi
+            .fn()
+            .mockResolvedValue({ err: null, unitsConsumed: 100_000n }),
+          sendTransaction,
+          getSignatureStatuses: vi.fn().mockResolvedValue([
+            {
+              confirmationStatus: "confirmed",
+              err: null,
+            },
+          ]),
+          getBlockHeight: vi.fn().mockResolvedValue(50),
+          getTransaction: vi
+            .fn()
+            .mockResolvedValue(makeConfirmedTransaction(wallet.address.toString(), tokenMint)),
+        },
+      },
+    );
+
+    expect(submitBundle).toHaveBeenCalledOnce();
+    expect(submitBundle).toHaveBeenCalledWith([expect.any(String), expect.any(String)]);
+    expect(sendTransaction).not.toHaveBeenCalled();
+    expect(upsertTrade).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({
+          state: "confirmed",
+          submittedVia: "jito",
+        }),
+      }),
+    );
+    expect(result).toEqual(
+      expect.objectContaining({
+        state: "done",
+        response: expect.objectContaining({ submitted_via: "jito" }),
+      }),
+    );
+  });
+
+  it("falls back to RPC only when Jito fails before acceptance", async () => {
+    const { executeSignalWithDependencies } = await import("../src/executor/index.js");
+    const { JitoSyncError } = await import("../src/executor/jito.js");
+    const wallet = await generateKeyPairSigner();
+    const tipAccount = (await generateKeyPairSigner()).address;
+    const tokenMint = "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN";
+    const sendTransaction = vi.fn().mockResolvedValue("sig-rpc-fallback");
+
+    await executeSignalWithDependencies(
+      {
+        signalId: "16161616-1616-4161-8161-161616161616",
+        tokenMint,
+        amountSol: 0.01,
+        maxSlippageBps: 300,
+      },
+      {
+        wallet,
+        now: vi.fn().mockReturnValue(1_000),
+        sleep: vi.fn().mockResolvedValue(undefined),
+        quoteClient: {
+          getQuote: vi.fn().mockResolvedValue(makeQuote()),
+          getSwapInstructions: vi.fn().mockResolvedValue(makeSwapInstructions()),
+        },
+        priorityFeeClient: {
+          getPriorityFeeEstimate: vi.fn().mockResolvedValue(12_345n),
+        },
+        jitoClient: {
+          getTipAccount: vi.fn().mockResolvedValue(tipAccount),
+          submitBundle: vi.fn().mockRejectedValue(new JitoSyncError("jito 429")),
+        },
+        connection: {
+          getLatestBlockhash: vi.fn().mockResolvedValue({
+            blockhash: "11111111111111111111111111111111",
+            lastValidBlockHeight: 55,
+          }),
+          fetchLookupTableAddresses: vi.fn().mockResolvedValue({}),
+          simulateTransaction: vi
+            .fn()
+            .mockResolvedValue({ err: null, unitsConsumed: 100_000n }),
+          sendTransaction,
+          getSignatureStatuses: vi.fn().mockResolvedValue([
+            {
+              confirmationStatus: "confirmed",
+              err: null,
+            },
+          ]),
+          getBlockHeight: vi.fn().mockResolvedValue(50),
+          getTransaction: vi
+            .fn()
+            .mockResolvedValue(makeConfirmedTransaction(wallet.address.toString(), tokenMint)),
+        },
+      },
+    );
+
+    expect(sendTransaction).toHaveBeenCalledOnce();
+    expect(upsertTrade).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({
+          state: "confirmed",
+          submittedVia: "rpc",
+        }),
+      }),
+    );
+  });
+
+  it("treats local Jito tip construction errors as pre-submit failures", async () => {
+    const { executeSignalWithDependencies } = await import("../src/executor/index.js");
+    const { address } = await import("@solana/kit");
+    const wallet = await generateKeyPairSigner();
+    const sendTransaction = vi.fn();
+    const submitBundle = vi.fn();
+
+    const result = await executeSignalWithDependencies(
+      {
+        signalId: "18181818-1818-4181-8181-181818181818",
+        tokenMint: "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",
+        amountSol: 0.01,
+        maxSlippageBps: 300,
+      },
+      {
+        wallet,
+        now: vi.fn().mockReturnValue(1_000),
+        sleep: vi.fn().mockResolvedValue(undefined),
+        quoteClient: {
+          getQuote: vi.fn().mockResolvedValue(makeQuote()),
+          getSwapInstructions: vi.fn().mockResolvedValue(makeSwapInstructions()),
+        },
+        priorityFeeClient: {
+          getPriorityFeeEstimate: vi.fn().mockResolvedValue(12_345n),
+        },
+        jitoClient: {
+          getTipAccount: vi
+            .fn()
+            .mockResolvedValue(address("11111111111111111111111111111111")),
+          submitBundle,
+        },
+        connection: {
+          getLatestBlockhash: vi.fn().mockResolvedValue({
+            blockhash: "11111111111111111111111111111111",
+            lastValidBlockHeight: 55,
+          }),
+          fetchLookupTableAddresses: vi.fn().mockResolvedValue({}),
+          simulateTransaction: vi
+            .fn()
+            .mockResolvedValue({ err: null, unitsConsumed: 100_000n }),
+          sendTransaction,
+          getSignatureStatuses: vi.fn(),
+          getBlockHeight: vi.fn(),
+          getTransaction: vi.fn(),
+        },
+      },
+    );
+
+    expect(submitBundle).not.toHaveBeenCalled();
+    expect(sendTransaction).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      state: "failed",
+      decision: "pre_submit_failed",
+      response: {
+        error: "pre_submit_failed",
+        signal_id: "18181818-1818-4181-8181-181818181818",
+      },
+    });
+    expect(upsertTrade).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({
+          state: "pre_submit_failed",
+          signature: null,
+        }),
+      }),
+    );
+  });
+
+  it("does not fall back after Jito accepts and confirmation becomes uncertain", async () => {
+    const { executeSignalWithDependencies } = await import("../src/executor/index.js");
+    const wallet = await generateKeyPairSigner();
+    const tipAccount = (await generateKeyPairSigner()).address;
+    const sendTransaction = vi.fn();
+    let currentTime = 1_000;
+
+    const result = await executeSignalWithDependencies(
+      {
+        signalId: "17171717-1717-4171-8171-171717171717",
+        tokenMint: "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",
+        amountSol: 0.01,
+        maxSlippageBps: 300,
+      },
+      {
+        wallet,
+        now: vi.fn(() => currentTime),
+        sleep: vi.fn().mockImplementation(async () => {
+          currentTime += 46_000;
+        }),
+        quoteClient: {
+          getQuote: vi.fn().mockResolvedValue(makeQuote()),
+          getSwapInstructions: vi.fn().mockResolvedValue(makeSwapInstructions()),
+        },
+        priorityFeeClient: {
+          getPriorityFeeEstimate: vi.fn().mockResolvedValue(12_345n),
+        },
+        jitoClient: {
+          getTipAccount: vi.fn().mockResolvedValue(tipAccount),
+          submitBundle: vi.fn().mockResolvedValue("bundle-accepted"),
+        },
+        connection: {
+          getLatestBlockhash: vi.fn().mockResolvedValue({
+            blockhash: "11111111111111111111111111111111",
+            lastValidBlockHeight: 55,
+          }),
+          fetchLookupTableAddresses: vi.fn().mockResolvedValue({}),
+          simulateTransaction: vi
+            .fn()
+            .mockResolvedValue({ err: null, unitsConsumed: 100_000n }),
+          sendTransaction,
+          getSignatureStatuses: vi.fn().mockResolvedValue([null]),
+          getBlockHeight: vi.fn().mockResolvedValue(50),
+          getTransaction: vi.fn(),
+        },
+      },
+    );
+
+    expect(sendTransaction).not.toHaveBeenCalled();
+    expect(result).toEqual(
+      expect.objectContaining({
+        state: "failed",
+        decision: "uncertain",
+      }),
+    );
+    expect(upsertTrade).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({
+          state: "uncertain",
+          submittedVia: "jito",
+        }),
+      }),
+    );
+  });
 });

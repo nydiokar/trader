@@ -29,12 +29,20 @@ import {
   tradesSubmitted,
 } from "../metrics/registry.js";
 import { getSolanaRpc, getTradingSigner } from "../solana/runtime.js";
+import {
+  base64WireTransactionToBase58,
+  createJitoClient,
+  createJitoTipTransaction,
+  JitoSyncError,
+  type JitoClient,
+} from "./jito.js";
 import { getQuote, getSwapInstructions } from "./jupiter.js";
 import { getPriorityFeeEstimate } from "./priority_fee.js";
 
 const FIXED_COMPUTE_UNIT_LIMIT = 1_400_000;
 const CONFIRM_TIMEOUT_MS = 45_000;
 const CONFIRM_POLL_INTERVAL_MS = 1_500;
+const EXPIRY_FINAL_CHECK_DELAY_MS = 2_000;
 
 type ExecutionOutcome =
   | "confirmed"
@@ -83,6 +91,8 @@ type ExecutorDependencies = {
   wallet: Awaited<ReturnType<typeof getTradingSigner>>;
   quoteClient: QuoteClient;
   priorityFeeClient: PriorityFeeClient;
+  jitoClient?: JitoClient;
+  jitoTipLamports?: bigint;
   dryRun?: boolean;
   now(): number;
   sleep(ms: number): Promise<void>;
@@ -91,7 +101,7 @@ type ExecutorDependencies = {
 type PersistedTrade = {
   signature: string | null;
   state: ExecutionOutcome;
-  submittedVia: "rpc";
+  submittedVia: "jito" | "rpc";
   errorMsg?: string;
   amountOutActual?: number;
   dryRun?: boolean;
@@ -136,6 +146,8 @@ function defaultDependencies(): Promise<ExecutorDependencies> {
     priorityFeeClient: {
       getPriorityFeeEstimate,
     },
+    jitoClient: createJitoClient(),
+    jitoTipLamports: BigInt(config.JITO_TIP_LAMPORTS),
     dryRun: config.DRY_RUN,
     now: () => Date.now(),
     sleep: (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
@@ -183,6 +195,7 @@ export async function executeSignalWithDependencies(
   const createdAt = Math.floor(deps.now() / 1000);
 
   let signature: Signature | undefined;
+  let submissionAttempted = false;
 
   try {
     const quote = await deps.quoteClient.getQuote(
@@ -240,11 +253,16 @@ export async function executeSignalWithDependencies(
       };
     }
 
-    await deps.connection.sendTransaction(signedWireTransaction, {
-      skipPreflight: true,
-      maxRetries: 0,
+    const submittedVia = await submitBuiltTransaction({
+      deps,
+      builtTransaction,
+      signedWireTransaction,
+      submissionState: {
+        markAttempted: () => {
+          submissionAttempted = true;
+        },
+      },
     });
-    tradesSubmitted.inc({ path: "rpc" });
 
     const stopSubmitTimer = submitToConfirmSeconds.startTimer();
     let outcome: ExecutionOutcome;
@@ -269,7 +287,7 @@ export async function executeSignalWithDependencies(
       input,
       createdAt,
       deps.now(),
-      toPersistedTrade(outcome, signature, reconciliation),
+      toPersistedTrade(outcome, signature, submittedVia, reconciliation),
     );
 
     tradesConfirmed.inc({ result: outcome });
@@ -285,11 +303,11 @@ export async function executeSignalWithDependencies(
             error: "reconciliation_failed",
             error_msg: reconciliation.errorMsg,
             signal_id: input.signalId,
-            signature: signature.toString(),
-            submitted_via: "rpc",
-          },
-        };
-      }
+          signature: signature.toString(),
+          submitted_via: submittedVia,
+        },
+      };
+    }
 
       return {
         state: "done",
@@ -298,7 +316,7 @@ export async function executeSignalWithDependencies(
           status: "confirmed",
           signal_id: input.signalId,
           signature: signature.toString(),
-          submitted_via: "rpc",
+          submitted_via: submittedVia,
           amount_out_actual: reconciliation?.ok ? reconciliation.amountOutActual : undefined,
         },
       };
@@ -317,16 +335,16 @@ export async function executeSignalWithDependencies(
     stopTimer();
 
     const outcome: Extract<ExecutionOutcome, "pre_submit_failed" | "uncertain"> =
-      signature ? "uncertain" : "pre_submit_failed";
+      signature && submissionAttempted ? "uncertain" : "pre_submit_failed";
 
     logger.error(
       { err: error, signal_id: input.signalId, signature: signature?.toString() },
-      signature
+      submissionAttempted
         ? "executor failed after submission"
         : "executor failed before submission",
     );
     await writeTrade(input, createdAt, deps.now(), {
-      signature: signature?.toString() ?? null,
+      signature: submissionAttempted ? signature?.toString() ?? null : null,
       state: outcome,
       submittedVia: "rpc",
       errorMsg: error instanceof Error ? error.message : "unknown executor error",
@@ -338,7 +356,7 @@ export async function executeSignalWithDependencies(
       response: {
         error: outcome,
         signal_id: input.signalId,
-        ...(signature ? { signature: signature.toString() } : {}),
+        ...(submissionAttempted && signature ? { signature: signature.toString() } : {}),
       },
     };
   }
@@ -421,6 +439,7 @@ async function buildSwapTransaction(
 ): Promise<{
   transaction: Awaited<ReturnType<typeof signTransactionMessageWithSigners>>;
   lastValidBlockHeight: number;
+  latestBlockhash: { blockhash: Blockhash; lastValidBlockHeight: bigint };
 }> {
   const latestBlockhash = await connection.getLatestBlockhash("confirmed");
   const addressesByLookupTableAddress = await connection.fetchLookupTableAddresses(
@@ -463,7 +482,57 @@ async function buildSwapTransaction(
   return {
     transaction: await signTransactionMessageWithSigners(transactionMessage),
     lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
+    latestBlockhash: {
+      blockhash: latestBlockhash.blockhash,
+      lastValidBlockHeight: BigInt(latestBlockhash.lastValidBlockHeight),
+    },
   };
+}
+
+async function submitBuiltTransaction(input: {
+  deps: ExecutorDependencies;
+  builtTransaction: Awaited<ReturnType<typeof buildSwapTransaction>>;
+  signedWireTransaction: Base64EncodedWireTransaction;
+  submissionState: { markAttempted(): void };
+}): Promise<"jito" | "rpc"> {
+  if (input.deps.jitoClient) {
+    try {
+      const tipTransaction = await createJitoTipTransaction({
+        wallet: input.deps.wallet,
+        tipAccount: await input.deps.jitoClient.getTipAccount(),
+        tipLamports: input.deps.jitoTipLamports ?? BigInt(config.JITO_TIP_LAMPORTS),
+        latestBlockhash: input.builtTransaction.latestBlockhash,
+      });
+      const bundleId = await input.deps.jitoClient.submitBundle([
+        base64WireTransactionToBase58(tipTransaction.base64WireTransaction),
+        base64WireTransactionToBase58(input.signedWireTransaction),
+      ]);
+      input.submissionState.markAttempted();
+      logger.info(
+        {
+          bundle_id: bundleId,
+          tip_signature: tipTransaction.signature,
+        },
+        "jito bundle accepted",
+      );
+      tradesSubmitted.inc({ path: "jito" });
+      return "jito";
+    } catch (error) {
+      if (!(error instanceof JitoSyncError)) {
+        throw error;
+      }
+
+      logger.warn({ err: error }, "jito sync error before acceptance, falling back to RPC");
+    }
+  }
+
+  input.submissionState.markAttempted();
+  await input.deps.connection.sendTransaction(input.signedWireTransaction, {
+    skipPreflight: true,
+    maxRetries: 0,
+  });
+  tradesSubmitted.inc({ path: "rpc" });
+  return "rpc";
 }
 
 function createSwapTransactionMessage(input: {
@@ -569,6 +638,7 @@ async function pollForConfirmation(
     }
 
     if (blockHeight > lastValidBlockHeight) {
+      await sleep(EXPIRY_FINAL_CHECK_DELAY_MS);
       const [finalCheck] = await connection.getSignatureStatuses([signature], {
         searchTransactionHistory: false,
       });
@@ -592,12 +662,13 @@ async function pollForConfirmation(
 function toPersistedTrade(
   outcome: ExecutionOutcome,
   signature: Signature,
+  submittedVia: "jito" | "rpc",
   reconciliation?: ReconciliationResult,
 ): PersistedTrade {
   return {
     signature: signature.toString(),
     state: outcome,
-    submittedVia: "rpc",
+    submittedVia,
     amountOutActual: reconciliation?.ok ? reconciliation.amountOutActual : undefined,
     dryRun: false,
     errorMsg:

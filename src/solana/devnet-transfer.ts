@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 import bs58 from "bs58";
 import {
   AccountRole,
@@ -15,6 +16,7 @@ import {
   setTransactionMessageLifetimeUsingBlockhash,
   signTransactionMessageWithSigners,
   type Address,
+  type Blockhash,
   type Signature,
 } from "@solana/kit";
 
@@ -38,6 +40,7 @@ async function main(): Promise<void> {
   const signer = await createKeyPairSignerFromBytes(bs58.decode(secretKeyBase58), true);
   const rpc = createSolanaRpc(rpcUrl);
   const amountLamports = BigInt(Math.floor(amountSol * 1_000_000_000));
+  const dryRun = process.argv.includes("--dry-run");
 
   if (amountLamports <= 0n) {
     throw new Error("--amount is too small to transfer at least 1 lamport");
@@ -46,36 +49,30 @@ async function main(): Promise<void> {
   const latestBlockhash = await rpc
     .getLatestBlockhash({ commitment: "confirmed" })
     .send();
-  const transferInstruction = createSystemTransferInstruction(
-    address(signer.address),
-    address(destination),
+  const { signature, base64WireTransaction } = await buildDevnetTransferTransaction({
+    signer,
+    destination: address(destination),
     amountLamports,
-  );
-
-  const transactionMessage = pipe(
-    createTransactionMessage({ version: 0 }),
-    (message) => setTransactionMessageFeePayerSigner(signer, message),
-    (message) =>
-      setTransactionMessageLifetimeUsingBlockhash(
-        {
-          blockhash: latestBlockhash.value.blockhash,
-          lastValidBlockHeight: latestBlockhash.value.lastValidBlockHeight,
-        },
-        message,
-      ),
-    (message) => appendTransactionMessageInstructions([transferInstruction], message),
-  );
-
-  const signedTransaction = await signTransactionMessageWithSigners(transactionMessage);
-  const signature = getSignatureFromTransaction(signedTransaction);
+    latestBlockhash: {
+      blockhash: latestBlockhash.value.blockhash,
+      lastValidBlockHeight: latestBlockhash.value.lastValidBlockHeight,
+    },
+  });
 
   console.log(`RPC: ${rpcUrl}`);
   console.log(`From: ${signer.address}`);
   console.log(`To: ${destination}`);
   console.log(`Amount: ${amountSol} SOL (${amountLamports} lamports)`);
+  console.log(`Signature: ${signature}`);
+
+  if (dryRun) {
+    console.log(`Signed transaction base64: ${base64WireTransaction}`);
+    console.log("Dry run: devnet transaction constructed and signed; not submitted.");
+    return;
+  }
 
   await rpc
-    .sendTransaction(getBase64EncodedWireTransaction(signedTransaction), {
+    .sendTransaction(base64WireTransaction, {
       encoding: "base64",
       preflightCommitment: "confirmed",
       skipPreflight: false,
@@ -89,7 +86,6 @@ async function main(): Promise<void> {
     Number(latestBlockhash.value.lastValidBlockHeight),
   );
 
-  console.log(`Signature: ${signature}`);
   console.log(`Status: ${outcome}`);
 
   const balance = await rpc.getBalance(address(signer.address)).send();
@@ -100,7 +96,36 @@ async function main(): Promise<void> {
   }
 }
 
-function createSystemTransferInstruction(
+export async function buildDevnetTransferTransaction(input: {
+  signer: Awaited<ReturnType<typeof createKeyPairSignerFromBytes>>;
+  destination: Address;
+  amountLamports: bigint;
+  latestBlockhash: { blockhash: Blockhash; lastValidBlockHeight: bigint };
+}) {
+  const transferInstruction = createSystemTransferInstruction(
+    address(input.signer.address),
+    input.destination,
+    input.amountLamports,
+  );
+
+  const transactionMessage = pipe(
+    createTransactionMessage({ version: 0 }),
+    (message) => setTransactionMessageFeePayerSigner(input.signer, message),
+    (message) =>
+      setTransactionMessageLifetimeUsingBlockhash(input.latestBlockhash, message),
+    (message) => appendTransactionMessageInstructions([transferInstruction], message),
+  );
+
+  const signedTransaction = await signTransactionMessageWithSigners(transactionMessage);
+
+  return {
+    signedTransaction,
+    signature: getSignatureFromTransaction(signedTransaction),
+    base64WireTransaction: getBase64EncodedWireTransaction(signedTransaction),
+  };
+}
+
+export function createSystemTransferInstruction(
   source: Address,
   destination: Address,
   lamports: bigint,
@@ -188,7 +213,9 @@ function parsePositiveNumber(raw: string): number {
   return parsed;
 }
 
-void main().catch((error: unknown) => {
-  console.error("devnet transfer failed:", error);
-  process.exit(1);
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  void main().catch((error: unknown) => {
+    console.error("devnet transfer failed:", error);
+    process.exit(1);
+  });
+}

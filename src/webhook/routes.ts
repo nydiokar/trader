@@ -10,7 +10,7 @@ import {
 } from "../metrics/registry.js";
 import { config } from "../config.js";
 import { executeSignal } from "../executor/index.js";
-import { runBlockers } from "../risk/index.js";
+import { runBlockers, runTripwires } from "../risk/index.js";
 import { getSolanaRpc, getTradingSigner } from "../solana/runtime.js";
 import { verifyHmac } from "./auth.js";
 import {
@@ -38,6 +38,9 @@ type BlockerCheck = (
   tokenMint: string,
   amountSol: number,
 ) => Promise<{ blocked: false } | { blocked: true; reason: string }>;
+type TripwireCheck = (
+  tokenMint: string,
+) => Promise<{ triggered: string[] }>;
 
 export async function registerRoutes(
   app: FastifyInstance,
@@ -45,6 +48,7 @@ export async function registerRoutes(
     processSignal?: SignalProcessor;
     healthCheck?: HealthCheck;
     blockerCheck?: BlockerCheck;
+    tripwireCheck?: TripwireCheck;
   },
 ): Promise<void> {
   const processSignal: SignalProcessor =
@@ -58,6 +62,7 @@ export async function registerRoutes(
       ));
   const healthCheck = options?.healthCheck ?? checkSolanaHealth;
   const blockerCheck = options?.blockerCheck ?? runBlockers;
+  const tripwireCheck = options?.tripwireCheck ?? runTripwires;
 
   app.get("/healthz", async (_req, reply) => {
     let dbOk = false;
@@ -166,6 +171,38 @@ export async function registerRoutes(
 
         const statusCode = blocker.reason === "kill_switch" ? 503 : 200;
         return reply.code(statusCode).send(rejectionResponse);
+      }
+
+      const tripwires = await tripwireCheck(payload.token_mint);
+      if (tripwires.triggered.length > 0) {
+        logger.warn(
+          {
+            signal_id: payload.signal_id,
+            token_mint: payload.token_mint,
+            tripwires_triggered: tripwires.triggered,
+          },
+          "tripwires triggered",
+        );
+
+        if (config.TRIPWIRES_AS_BLOCKERS) {
+          rejections.inc({ reason: "tripwires_triggered" });
+          const rejectionResponse = {
+            status: "rejected",
+            decision: "tripwires_triggered",
+            tripwires_triggered: tripwires.triggered,
+            signal_id: payload.signal_id,
+          };
+
+          completeSignal(
+            payload.signal_id,
+            "rejected",
+            "tripwires_triggered",
+            rejectionResponse,
+            Math.floor(Date.now() / 1000),
+          );
+
+          return reply.code(200).send(rejectionResponse);
+        }
       }
 
       const result = await processSignal(payload);

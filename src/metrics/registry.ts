@@ -91,6 +91,7 @@ for (const reason of [
   "cooldown",
   "blocklist",
   "insufficient_balance",
+  "tripwires_triggered",
 ] as const) {
   rejections.labels(reason).inc(0);
 }
