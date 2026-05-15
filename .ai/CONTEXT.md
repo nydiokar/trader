@@ -1,6 +1,6 @@
 # Trader Bot - Project Context
 
-**Branch:** `main` | **Last Updated:** 2026-05-14 | **Status:** M0-M3 complete. M4-M5 core executor implemented with deterministic coverage; M6-M7 partially implemented; Flow-to-bot dry-run bridge Stage 1 complete, Stage 2/3 dry-run HTTP path implemented, and Stage 4 DB-backed dry-run execution journal implemented; live/staging acceptance remains blocked.
+**Branch:** `main` | **Last Updated:** 2026-05-15 | **Status:** M0-M3 complete. M4-M5 core executor implemented with deterministic coverage; M6-M7 partially implemented; Flow-to-bot dry-run bridge Stages 1-4 complete through DB-backed dry-run execution journal; production dry-run stream and live/staging acceptance remain blocked.
 
 ---
 
@@ -159,6 +159,24 @@ Stage 4 verification evidence:
 - `npm test` passed on 2026-05-15 with `72 passed`, `3 skipped`.
 - `tests/flow-dry-run-intake.test.ts` covers first valid delivery creating a DB journal and JSON export, terminal duplicate no risk rerun, concurrent duplicate no risk rerun, stale processing timeout, rejected exact `reject_reason`, invalid payload persistence, processing-error persistence, and no live executor path.
 - Additional hardening coverage proves duplicate `prepared_snapshot_id` deliveries do not rerun risk and stale JSON artifacts do not affect HTTP dry-run risk.
+
+Flow-to-Trader roadmap - broader milestones:
+- **Stage 5 - Production dry-run stream and live-readiness gate:** turn the completed bridge on in production dry-run mode, collect real Flow delivery evidence, add visibility, and define the exact live promotion gate before any capital is risked.
+- **Stage 6 - Bot-owned execution risk state:** add bot-owned market refresh, open-position state, token cooldowns, wallet exposure accounting, and durable state needed to decide whether an accepted Flow signal is executable now.
+- **Stage 7 - Live buy promotion and tiny-capital canary:** map an accepted dry-run order intent into the existing executor only behind explicit bot config and safety gates, then run tiny live buy canaries with landing-rate, latency, double-spend, and uncertainty evidence.
+- **Stage 8 - Position lifecycle and sell/exit engine:** own exits in the trader bot, including stop loss, take profit, time-based/manual exits, position reconciliation, and sell execution safety.
+- **Stage 9 - End-to-end production canary and size-up:** operate the full buy-hold-sell loop at tiny size, record evidence over multiple days, resolve incidents, then raise caps only when SLOs and operator controls are proven.
+
+Next immediate tasks - Stage 5:
+- [ ] Configure Flow production/staging `trader_bot` delivery to call trader `/flow/dry-run-signal` with `FLOW_DRY_RUN_WEBHOOK_SECRET`; keep live execution disabled.
+- [ ] Add or verify startup/deploy migration procedure so `execution_journal` migrations are applied before trader accepts Flow traffic.
+- [ ] Run a controlled dry-run stream from real Flow outbox deliveries into trader and record journal counts by accepted/rejected/duplicate/invalid/processing_error.
+- [ ] Add Prometheus metrics for Flow dry-run outcomes: received, accepted, rejected, duplicate, already_processing, invalid_payload, processing_error, stale_timeout, and live_disabled.
+- [ ] Add an operator report or Telegram alert path for accepted dry-runs, rejected dry-runs, invalid payloads, and processing errors.
+- [ ] Add replay tooling for recent Flow signals from the Flow outbox through trader risk without trading.
+- [ ] Add DB inspection/report tooling for `execution_journal` by token, run ID, prepared snapshot ID, source lane, decision, and reject reason.
+- [ ] Produce a Stage 5 evidence artifact with exact dates, config flags, sample journal IDs, outcome counts, and confirmation that no Jupiter/signing/submission path was called.
+- [ ] Do not implement live buy promotion or sell logic in Stage 5; those belong to later milestones.
 
 Integration complete definition of done:
 - [ ] Flow has a config-gated `trader_bot` sink beside Telegram/n8n.
