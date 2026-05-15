@@ -147,15 +147,18 @@ Stage 4 implementation notes:
 - New migration: `prisma/migrations/20260514120000_add_execution_journal/migration.sql`.
 - New DB journal helper: `src/flow/execution-journal-db.ts`.
 - `/flow/dry-run-signal` now inserts an atomic DB processing claim before risk evaluation. Terminal duplicates return the persisted decision without rerunning risk. Active processing duplicates return `already_processing` with the existing journal ID. Stale processing rows use one explicit rule: if the lease is older than `FLOW_EXECUTION_JOURNAL_LEASE_TIMEOUT_MS=120000`, mark the row `processing_error` with reason `stale_in_flight_timeout` and do not rerun risk.
+- Idempotency is enforced on `flow_signal_id`, `prepared_snapshot_id`, and `idempotency_key`.
+- The HTTP dry-run decision path no longer reads existing JSON artifacts as risk input and no longer writes a pre-DB decision JSON; JSON is rebuilt from the completed DB row.
 - Invalid payloads are persisted as `state=invalid_payload`, `reject_reason=invalid_payload`, `error_reason=invalid_payload`.
 - Processor exceptions are persisted as `state=processing_error`, `reject_reason=processing_error`, `error_reason=processing_error`.
 - Accepted/rejected DB rows are exported back to `data/execution-journals/<signal_id>.json`; the DB row is the durable idempotency record.
 - The endpoint still does not call Jupiter, sign, submit, change Flow behavior, Telegram/n8n behavior, or live `/signal` execution.
 
 Stage 4 verification evidence:
-- `npm run build` passed on 2026-05-14.
-- `npm test` passed on 2026-05-14 with `70 passed`, `3 skipped`.
+- `npm run build` passed on 2026-05-15.
+- `npm test` passed on 2026-05-15 with `72 passed`, `3 skipped`.
 - `tests/flow-dry-run-intake.test.ts` covers first valid delivery creating a DB journal and JSON export, terminal duplicate no risk rerun, concurrent duplicate no risk rerun, stale processing timeout, rejected exact `reject_reason`, invalid payload persistence, processing-error persistence, and no live executor path.
+- Additional hardening coverage proves duplicate `prepared_snapshot_id` deliveries do not rerun risk and stale JSON artifacts do not affect HTTP dry-run risk.
 
 Integration complete definition of done:
 - [ ] Flow has a config-gated `trader_bot` sink beside Telegram/n8n.

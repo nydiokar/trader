@@ -63,6 +63,9 @@ type FlowDryRunProcessor = (payload: {
   riskConfig?: Partial<FlowRiskConfig>;
   journalDir: string;
   now?: Date;
+  includeFileSeenTokenMints?: boolean;
+  writeJsonExport?: boolean;
+  writeAttemptArtifact?: boolean;
 }) => Promise<ExecutionJournal>;
 
 export async function registerRoutes(
@@ -374,6 +377,9 @@ export async function registerRoutes(
         riskConfig: { seen_token_mints: seenTokenMints },
         journalDir: flowJournalDir,
         now,
+        includeFileSeenTokenMints: false,
+        writeJsonExport: false,
+        writeAttemptArtifact: false,
       });
       const completed = await completeFlowExecutionJournalInDb({
         journalId: claim.row.journal_id,

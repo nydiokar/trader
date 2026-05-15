@@ -20,6 +20,9 @@ export type BuildJournalInput = {
   riskConfig?: Partial<FlowRiskConfig>;
   journalDir: string;
   now?: Date;
+  includeFileSeenTokenMints?: boolean;
+  writeJsonExport?: boolean;
+  writeAttemptArtifact?: boolean;
 };
 
 export type FlowDryRunHttpPayload = {
@@ -37,11 +40,12 @@ type RiskDecision = {
 export async function runFlowDryRun(input: BuildJournalInput): Promise<ExecutionJournal> {
   const now = input.now ?? new Date();
   const signal = normalizeFlowSignal(input.rawSignal);
+  const includeFileSeenTokenMints = input.includeFileSeenTokenMints ?? true;
   const riskConfig = FlowRiskConfigSchema.parse({
     ...input.riskConfig,
     seen_token_mints: [
       ...(input.riskConfig?.seen_token_mints ?? []),
-      ...(await readSeenTokenMints(input.journalDir)),
+      ...(includeFileSeenTokenMints ? await readSeenTokenMints(input.journalDir) : []),
     ],
   });
   const risk = evaluateFlowRisk(signal, riskConfig, now);
@@ -76,19 +80,23 @@ export async function runFlowDryRun(input: BuildJournalInput): Promise<Execution
     outcome: "pending_not_executed",
   });
 
-  await mkdir(input.journalDir, { recursive: true });
-  await writeFile(journalPath, `${JSON.stringify(journal, null, 2)}\n`, "utf8");
-  await writeFlowDryRunAttempt(input.journalDir, {
-    status: risk.decision === "accepted" ? "dry_run_accepted" : "dry_run_rejected",
-    signal_id: signal.signal_id,
-    idempotency_key: input.idempotencyKey,
-    journal_id: journal.journal_id,
-    journal_path: journal.journal_path,
-    risk_decision: journal.risk_decision,
-    reject_reason: journal.reject_reason,
-    live_execution_enabled: false,
-    created_at: now.toISOString(),
-  });
+  if (input.writeJsonExport ?? true) {
+    await mkdir(input.journalDir, { recursive: true });
+    await writeFile(journalPath, `${JSON.stringify(journal, null, 2)}\n`, "utf8");
+  }
+  if (input.writeAttemptArtifact ?? true) {
+    await writeFlowDryRunAttempt(input.journalDir, {
+      status: risk.decision === "accepted" ? "dry_run_accepted" : "dry_run_rejected",
+      signal_id: signal.signal_id,
+      idempotency_key: input.idempotencyKey,
+      journal_id: journal.journal_id,
+      journal_path: journal.journal_path,
+      risk_decision: journal.risk_decision,
+      reject_reason: journal.reject_reason,
+      live_execution_enabled: false,
+      created_at: now.toISOString(),
+    });
+  }
   return journal;
 }
 

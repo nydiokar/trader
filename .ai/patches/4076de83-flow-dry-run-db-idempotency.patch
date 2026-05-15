@@ -1,0 +1,1326 @@
+diff --git a/.ai/CONTEXT.md b/.ai/CONTEXT.md
+index 4f973fe..aad895d 100644
+--- a/.ai/CONTEXT.md
++++ b/.ai/CONTEXT.md
+@@ -1,6 +1,6 @@
+ # Trader Bot - Project Context
+ 
+-**Branch:** `main` | **Last Updated:** 2026-05-14 | **Status:** M0-M3 complete. M4-M5 core executor implemented with deterministic coverage; M6-M7 partially implemented; Flow-to-bot dry-run bridge Stage 1 complete and Stage 2/3 dry-run HTTP path implemented; live/staging acceptance remains blocked.
++**Branch:** `main` | **Last Updated:** 2026-05-14 | **Status:** M0-M3 complete. M4-M5 core executor implemented with deterministic coverage; M6-M7 partially implemented; Flow-to-bot dry-run bridge Stage 1 complete, Stage 2/3 dry-run HTTP path implemented, and Stage 4 DB-backed dry-run execution journal implemented; live/staging acceptance remains blocked.
+ 
+ ---
+ 
+@@ -128,10 +128,13 @@ Stage 2/3 verification evidence:
+ - Flow `npm run typecheck:scripts` remains blocked by pre-existing unrelated script errors, including `scripts/general/verify-trigger-parse.ts`, `scripts/one-time/check-db.ts`, and several evaluation/test scripts. Source typecheck and the focused signal-delivery smoke test passed.
+ - Local simulated Flow-to-trader delivery is covered by `tests/flow-dry-run-intake.test.ts`, which posts a Flow `PreparationOutput` shape to `/flow/dry-run-signal` and receives an accepted dry-run journal summary with `live_execution_enabled=false`.
+ 
+-Stage 4 next tasks - production pre-execution foundation:
+-- [ ] Add DB-backed `execution_journal` records while preserving JSON export.
+-- [ ] Add journal idempotency keyed by Flow signal/prepared snapshot ID.
+-- [ ] Replace the Stage 3 file-claim idempotency guard with DB-backed atomic idempotency and stale-claim recovery.
++Stage 4 progress - production pre-execution foundation:
++- [x] Add DB-backed `execution_journal` records while preserving JSON export.
++- [x] Add journal idempotency keyed by Flow signal/prepared snapshot ID and idempotency key.
++- [x] Replace the Stage 3 file-claim idempotency guard with DB-backed atomic idempotency and stale-claim handling.
++- [x] Persist accepted, rejected, invalid payload, and processing-error decisions with exact machine-readable reasons.
++- [x] Keep `/flow/dry-run-signal` live execution hard-disabled with `live_execution_enabled=false`.
++- [x] Preserve JSON journal files as operator artifacts rebuilt from completed DB journal rows.
+ - [ ] Add replay tooling for recent Flow signals through bot risk.
+ - [ ] Add bot-owned price/liquidity refresh before any live intent.
+ - [ ] Wire bot alerts for accepted dry-run, rejected dry-run, and future execution uncertainty.
+@@ -139,6 +142,24 @@ Stage 4 next tasks - production pre-execution foundation:
+ - [ ] Define live execution promotion gates requiring bot config `live_execution_enabled=true`, `DRY_RUN=false`, kill switch off, wallet floor, fresh signal, and unused idempotency.
+ - [ ] Only after those gates, map accepted dry-run order intent into the existing executor shape.
+ 
++Stage 4 implementation notes:
++- Added Prisma model/table `execution_journal` with unique `flow_signal_id` and `idempotency_key`, raw payload JSON, normalized signal JSON, price/liquidity snapshot, risk config/checks/decision, reject/error reasons, dry-run order JSON, state/outcome, timestamps, lease metadata, `journal_path`, and `live_execution_enabled=false`.
++- New migration: `prisma/migrations/20260514120000_add_execution_journal/migration.sql`.
++- New DB journal helper: `src/flow/execution-journal-db.ts`.
++- `/flow/dry-run-signal` now inserts an atomic DB processing claim before risk evaluation. Terminal duplicates return the persisted decision without rerunning risk. Active processing duplicates return `already_processing` with the existing journal ID. Stale processing rows use one explicit rule: if the lease is older than `FLOW_EXECUTION_JOURNAL_LEASE_TIMEOUT_MS=120000`, mark the row `processing_error` with reason `stale_in_flight_timeout` and do not rerun risk.
++- Idempotency is enforced on `flow_signal_id`, `prepared_snapshot_id`, and `idempotency_key`.
++- The HTTP dry-run decision path no longer reads existing JSON artifacts as risk input and no longer writes a pre-DB decision JSON; JSON is rebuilt from the completed DB row.
++- Invalid payloads are persisted as `state=invalid_payload`, `reject_reason=invalid_payload`, `error_reason=invalid_payload`.
++- Processor exceptions are persisted as `state=processing_error`, `reject_reason=processing_error`, `error_reason=processing_error`.
++- Accepted/rejected DB rows are exported back to `data/execution-journals/<signal_id>.json`; the DB row is the durable idempotency record.
++- The endpoint still does not call Jupiter, sign, submit, change Flow behavior, Telegram/n8n behavior, or live `/signal` execution.
++
++Stage 4 verification evidence:
++- `npm run build` passed on 2026-05-15.
++- `npm test` passed on 2026-05-15 with `72 passed`, `3 skipped`.
++- `tests/flow-dry-run-intake.test.ts` covers first valid delivery creating a DB journal and JSON export, terminal duplicate no risk rerun, concurrent duplicate no risk rerun, stale processing timeout, rejected exact `reject_reason`, invalid payload persistence, processing-error persistence, and no live executor path.
++- Additional hardening coverage proves duplicate `prepared_snapshot_id` deliveries do not rerun risk and stale JSON artifacts do not affect HTTP dry-run risk.
++
+ Integration complete definition of done:
+ - [ ] Flow has a config-gated `trader_bot` sink beside Telegram/n8n.
+ - [ ] Trader has authenticated dry-run HTTP intake for Flow payloads.
+diff --git a/.ai/milestones/Flow-to-Trader-Stage4.md b/.ai/milestones/Flow-to-Trader-Stage4.md
+new file mode 100644
+index 0000000..b1e29f9
+--- /dev/null
++++ b/.ai/milestones/Flow-to-Trader-Stage4.md
+@@ -0,0 +1,66 @@
++# Flow-to-Trader Stage 4 - DB-Backed Dry-Run Foundation
++
++**Date:** 2026-05-15  
++**Status:** Complete for dry-run production pre-execution foundation. Not live-trading complete.
++
++## Goal
++
++Replace file-based `/flow/dry-run-signal` idempotency with a durable DB-backed execution journal, while keeping the path dry-run only and preserving JSON files as operator artifacts.
++
++## Completed
++
++- Added `execution_journal` Prisma model and migrations.
++- Persisted raw payload, normalized signal, risk config, risk checks, risk decision, reject/error reason, dry-run order, state/outcome, timestamps, lease metadata, and `live_execution_enabled=false`.
++- Enforced idempotency on Flow signal ID, prepared snapshot ID, and idempotency key.
++- Replaced the HTTP endpoint's file lock with a DB claim flow.
++- Terminal duplicates return the persisted decision without rerunning risk.
++- Active duplicates return `already_processing`.
++- Stale processing rows follow one deterministic rule: after `FLOW_EXECUTION_JOURNAL_LEASE_TIMEOUT_MS=120000`, mark `processing_error` with reason `stale_in_flight_timeout`.
++- Invalid payloads persist `invalid_payload`.
++- Processor exceptions persist `processing_error`.
++- Accepted/rejected DB rows export JSON to `data/execution-journals/<signal_id>.json`.
++- HTTP dry-run risk no longer reads existing JSON artifacts.
++- HTTP dry-run no longer writes pre-DB decision JSON.
++- No Jupiter, signing, submission, Flow gates/scoring, Telegram/n8n, or live `/signal` behavior was changed.
++
++## Evidence
++
++- `npm run db:generate` passed.
++- `npm run build` passed.
++- `npm test -- tests/flow-dry-run-intake.test.ts` passed with `11 passed`.
++- `npm test` passed with `72 passed`, `3 skipped`.
++
++## Caveats
++
++- This completes the dry-run pre-execution persistence foundation, not live trading.
++- The endpoint is ready for production-like Flow-to-trader dry-run simulations, provided live execution remains disabled.
++- Metrics and alerts for Flow dry-run outcomes are not yet wired.
++- Replay tooling for recent Flow signals is not yet implemented.
++- Bot-owned price/liquidity refresh, open-position state, live promotion gates, and sell/exit management remain future milestones.
++
++## Next Milestone
++
++**Flow-to-Trader Stage 5 - Production Dry-Run Stream and Live-Readiness Gate**
++
++Goal: run real Flow deliveries into trader in production dry-run mode, collect evidence, add operator visibility, and define the exact live promotion gate before any capital is put at risk.
++
++Tasks:
++
++- Configure Flow `trader_bot` delivery to hit trader `/flow/dry-run-signal` in dry-run mode.
++- Run the dry-run stream with live execution disabled and verify no executor/Jupiter/signing/submission path is called.
++- Add metrics for received, accepted, rejected, duplicate, invalid, processing_error, stale_timeout, and live_disabled outcomes.
++- Add operator alerts or reports for accepted/rejected/error dry-runs.
++- Add replay tooling for recent Flow signals from the Flow outbox into trader risk.
++- Add DB query/report tooling for accepted/rejected dry-runs by token, source lane, and reject reason.
++- Add bot-owned market refresh before any future live promotion decision.
++- Add open-position state and token cooldown state.
++- Define live promotion preconditions: explicit bot config, `DRY_RUN=false`, kill switch off, wallet floor, fresh signal, no duplicate, no open position, size cap, and accepted bot risk.
++- Record dry-run stream evidence before enabling any live path.
++
++Exit criteria:
++
++- At least one sustained dry-run session from real Flow outbox deliveries is recorded.
++- All dry-run outcomes are queryable in `execution_journal`.
++- Operators can see accepted/rejected/error rates and exact reasons.
++- No live execution code path is reachable from Flow dry-run.
++- A written live-promotion checklist exists and is test-covered before any trade can be submitted.
+diff --git a/prisma/migrations/20260514120000_add_execution_journal/migration.sql b/prisma/migrations/20260514120000_add_execution_journal/migration.sql
+new file mode 100644
+index 0000000..112fc1d
+--- /dev/null
++++ b/prisma/migrations/20260514120000_add_execution_journal/migration.sql
+@@ -0,0 +1,48 @@
++-- CreateTable
++CREATE TABLE "execution_journal" (
++    "journal_id" TEXT NOT NULL PRIMARY KEY,
++    "flow_signal_id" TEXT,
++    "flow_run_id" TEXT,
++    "prepared_snapshot_id" TEXT,
++    "idempotency_key" TEXT NOT NULL,
++    "token_mint" TEXT,
++    "source_lane" TEXT,
++    "signal_reason" TEXT,
++    "raw_payload_json" TEXT NOT NULL,
++    "normalized_signal_json" TEXT,
++    "price_liquidity_snapshot_json" TEXT,
++    "risk_config_json" TEXT,
++    "risk_checks_json" TEXT,
++    "risk_decision" TEXT,
++    "reject_reason" TEXT,
++    "dry_run_order_json" TEXT,
++    "live_execution_enabled" BOOLEAN NOT NULL DEFAULT false,
++    "live_promoted_at" DATETIME,
++    "trade_id" INTEGER,
++    "outcome" TEXT NOT NULL,
++    "state" TEXT NOT NULL,
++    "lease_owner" TEXT,
++    "lease_claimed_at" DATETIME,
++    "lease_expires_at" DATETIME,
++    "error_reason" TEXT,
++    "error_message" TEXT,
++    "journal_path" TEXT,
++    "created_at" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    "updated_at" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    "completed_at" DATETIME
++);
++
++-- CreateIndex
++CREATE UNIQUE INDEX "execution_journal_flow_signal_id_key" ON "execution_journal"("flow_signal_id");
++
++-- CreateIndex
++CREATE UNIQUE INDEX "execution_journal_idempotency_key_key" ON "execution_journal"("idempotency_key");
++
++-- CreateIndex
++CREATE INDEX "idx_execution_journal_prepared_snapshot_id" ON "execution_journal"("prepared_snapshot_id");
++
++-- CreateIndex
++CREATE INDEX "idx_execution_journal_state" ON "execution_journal"("state");
++
++-- CreateIndex
++CREATE INDEX "idx_execution_journal_token_mint" ON "execution_journal"("token_mint");
+diff --git a/prisma/migrations/20260515090000_unique_prepared_snapshot_id/migration.sql b/prisma/migrations/20260515090000_unique_prepared_snapshot_id/migration.sql
+new file mode 100644
+index 0000000..3fe15bc
+--- /dev/null
++++ b/prisma/migrations/20260515090000_unique_prepared_snapshot_id/migration.sql
+@@ -0,0 +1,5 @@
++-- Replace the non-unique helper index with an idempotency-enforcing unique index.
++DROP INDEX "idx_execution_journal_prepared_snapshot_id";
++
++CREATE UNIQUE INDEX "execution_journal_prepared_snapshot_id_key"
++ON "execution_journal"("prepared_snapshot_id");
+diff --git a/prisma/schema.prisma b/prisma/schema.prisma
+index 6a894a7..0f4f29a 100644
+--- a/prisma/schema.prisma
++++ b/prisma/schema.prisma
+@@ -52,6 +52,45 @@ model Trade {
+   @@map("trades")
+ }
+ 
++// Flow dry-run pre-execution journal. DB is the durable idempotency record;
++// JSON files are rebuilt operator artifacts.
++model ExecutionJournal {
++  journalId                  String    @id @map("journal_id")
++  flowSignalId               String?   @unique @map("flow_signal_id")
++  flowRunId                  String?   @map("flow_run_id")
++  preparedSnapshotId         String?   @unique @map("prepared_snapshot_id")
++  idempotencyKey             String    @unique @map("idempotency_key")
++  tokenMint                  String?   @map("token_mint")
++  sourceLane                 String?   @map("source_lane")
++  signalReason               String?   @map("signal_reason")
++  rawPayloadJson             String    @map("raw_payload_json")
++  normalizedSignalJson       String?   @map("normalized_signal_json")
++  priceLiquiditySnapshotJson String?   @map("price_liquidity_snapshot_json")
++  riskConfigJson             String?   @map("risk_config_json")
++  riskChecksJson             String?   @map("risk_checks_json")
++  riskDecision               String?   @map("risk_decision")
++  rejectReason               String?   @map("reject_reason")
++  dryRunOrderJson            String?   @map("dry_run_order_json")
++  liveExecutionEnabled       Boolean   @default(false) @map("live_execution_enabled")
++  livePromotedAt             DateTime? @map("live_promoted_at")
++  tradeId                    Int?      @map("trade_id")
++  state                      String
++  outcome                    String
++  errorReason                String?   @map("error_reason")
++  errorMessage               String?   @map("error_message")
++  journalPath                String?   @map("journal_path")
++  leaseOwner                 String?   @map("lease_owner")
++  leaseClaimedAt             DateTime? @map("lease_claimed_at")
++  leaseExpiresAt             DateTime? @map("lease_expires_at")
++  createdAt                  DateTime  @default(now()) @map("created_at")
++  updatedAt                  DateTime  @updatedAt @map("updated_at")
++  completedAt                DateTime? @map("completed_at")
++
++  @@index([tokenMint], name: "idx_execution_journal_token_mint")
++  @@index([state], name: "idx_execution_journal_state")
++  @@map("execution_journal")
++}
++
+ // Spec §4.1 — per-token blocklist
+ model Blocklist {
+   tokenMint String @id @map("token_mint")
+diff --git a/src/flow/dry-run.ts b/src/flow/dry-run.ts
+index 269a300..73e1f68 100644
+--- a/src/flow/dry-run.ts
++++ b/src/flow/dry-run.ts
+@@ -20,6 +20,9 @@ export type BuildJournalInput = {
+   riskConfig?: Partial<FlowRiskConfig>;
+   journalDir: string;
+   now?: Date;
++  includeFileSeenTokenMints?: boolean;
++  writeJsonExport?: boolean;
++  writeAttemptArtifact?: boolean;
+ };
+ 
+ export type FlowDryRunHttpPayload = {
+@@ -37,11 +40,12 @@ type RiskDecision = {
+ export async function runFlowDryRun(input: BuildJournalInput): Promise<ExecutionJournal> {
+   const now = input.now ?? new Date();
+   const signal = normalizeFlowSignal(input.rawSignal);
++  const includeFileSeenTokenMints = input.includeFileSeenTokenMints ?? true;
+   const riskConfig = FlowRiskConfigSchema.parse({
+     ...input.riskConfig,
+     seen_token_mints: [
+       ...(input.riskConfig?.seen_token_mints ?? []),
+-      ...(await readSeenTokenMints(input.journalDir)),
++      ...(includeFileSeenTokenMints ? await readSeenTokenMints(input.journalDir) : []),
+     ],
+   });
+   const risk = evaluateFlowRisk(signal, riskConfig, now);
+@@ -76,19 +80,23 @@ export async function runFlowDryRun(input: BuildJournalInput): Promise<Execution
+     outcome: "pending_not_executed",
+   });
+ 
+-  await mkdir(input.journalDir, { recursive: true });
+-  await writeFile(journalPath, `${JSON.stringify(journal, null, 2)}\n`, "utf8");
+-  await writeFlowDryRunAttempt(input.journalDir, {
+-    status: risk.decision === "accepted" ? "dry_run_accepted" : "dry_run_rejected",
+-    signal_id: signal.signal_id,
+-    idempotency_key: input.idempotencyKey,
+-    journal_id: journal.journal_id,
+-    journal_path: journal.journal_path,
+-    risk_decision: journal.risk_decision,
+-    reject_reason: journal.reject_reason,
+-    live_execution_enabled: false,
+-    created_at: now.toISOString(),
+-  });
++  if (input.writeJsonExport ?? true) {
++    await mkdir(input.journalDir, { recursive: true });
++    await writeFile(journalPath, `${JSON.stringify(journal, null, 2)}\n`, "utf8");
++  }
++  if (input.writeAttemptArtifact ?? true) {
++    await writeFlowDryRunAttempt(input.journalDir, {
++      status: risk.decision === "accepted" ? "dry_run_accepted" : "dry_run_rejected",
++      signal_id: signal.signal_id,
++      idempotency_key: input.idempotencyKey,
++      journal_id: journal.journal_id,
++      journal_path: journal.journal_path,
++      risk_decision: journal.risk_decision,
++      reject_reason: journal.reject_reason,
++      live_execution_enabled: false,
++      created_at: now.toISOString(),
++    });
++  }
+   return journal;
+ }
+ 
+diff --git a/src/flow/execution-journal-db.ts b/src/flow/execution-journal-db.ts
+new file mode 100644
+index 0000000..805a9e2
+--- /dev/null
++++ b/src/flow/execution-journal-db.ts
+@@ -0,0 +1,416 @@
++import { createHash, randomUUID } from "node:crypto";
++import { mkdir, writeFile } from "node:fs/promises";
++import * as path from "node:path";
++import { db } from "../db/index.js";
++import {
++  ExecutionJournalSchema,
++  type ExecutionJournal,
++  type FlowSignalArtifact,
++} from "./schemas.js";
++import { getFlowExecutionJournalPath } from "./dry-run.js";
++
++export const FLOW_EXECUTION_JOURNAL_LEASE_TIMEOUT_MS = 120_000;
++export const FLOW_STALE_IN_FLIGHT_REASON = "stale_in_flight_timeout";
++
++export type ExecutionJournalState =
++  | "processing"
++  | "accepted"
++  | "rejected"
++  | "invalid_payload"
++  | "processing_error";
++
++export type ExecutionJournalRow = {
++  journal_id: string;
++  flow_signal_id: string | null;
++  flow_run_id: string | null;
++  prepared_snapshot_id: string | null;
++  idempotency_key: string;
++  token_mint: string | null;
++  source_lane: string | null;
++  signal_reason: string | null;
++  raw_payload_json: string;
++  normalized_signal_json: string | null;
++  price_liquidity_snapshot_json: string | null;
++  risk_config_json: string | null;
++  risk_checks_json: string | null;
++  risk_decision: string | null;
++  reject_reason: string | null;
++  dry_run_order_json: string | null;
++  live_execution_enabled: boolean | number;
++  state: ExecutionJournalState;
++  outcome: string;
++  error_reason: string | null;
++  error_message: string | null;
++  journal_path: string | null;
++  lease_owner: string | null;
++  lease_claimed_at: string | Date | null;
++  lease_expires_at: string | Date | null;
++  created_at: string | Date;
++  updated_at: string | Date;
++  completed_at: string | Date | null;
++};
++
++export type FlowJournalClaimResult =
++  | { kind: "claimed"; row: ExecutionJournalRow; leaseOwner: string }
++  | { kind: "already_processing"; row: ExecutionJournalRow }
++  | { kind: "terminal"; row: ExecutionJournalRow }
++  | { kind: "stale_marked_processing_error"; row: ExecutionJournalRow };
++
++export async function claimFlowExecutionJournalInDb(input: {
++  signal: FlowSignalArtifact;
++  rawPayload: unknown;
++  idempotencyKey?: string;
++  journalDir: string;
++  now?: Date;
++}): Promise<FlowJournalClaimResult> {
++  const now = input.now ?? new Date();
++  const leaseOwner = randomUUID();
++  const leaseExpiresAt = new Date(now.getTime() + FLOW_EXECUTION_JOURNAL_LEASE_TIMEOUT_MS);
++  const idempotencyKey = input.idempotencyKey ?? `flow_dry_run:${input.signal.signal_id}`;
++  const preparedSnapshotId = input.signal.flow.prepared_snapshot_id ?? null;
++  const journalId = createDbJournalId(input.signal.signal_id, now);
++  const journalPath = getFlowExecutionJournalPath(input.journalDir, input.signal.signal_id);
++
++  return db.$transaction(async (tx) => {
++    await tx.$executeRaw`
++      INSERT OR IGNORE INTO execution_journal (
++        journal_id,
++        flow_signal_id,
++        flow_run_id,
++        prepared_snapshot_id,
++        idempotency_key,
++        token_mint,
++        source_lane,
++        signal_reason,
++        raw_payload_json,
++        normalized_signal_json,
++        price_liquidity_snapshot_json,
++        live_execution_enabled,
++        state,
++        outcome,
++        journal_path,
++        lease_owner,
++        lease_claimed_at,
++        lease_expires_at,
++        created_at,
++        updated_at
++      ) VALUES (
++        ${journalId},
++        ${input.signal.signal_id},
++        ${input.signal.flow.run_id ?? null},
++        ${preparedSnapshotId},
++        ${idempotencyKey},
++        ${input.signal.token_mint},
++        ${input.signal.source_lane},
++        ${input.signal.signal_reason},
++        ${json(input.rawPayload)},
++        ${json(input.signal)},
++        ${json(input.signal.price_liquidity_snapshot)},
++        ${false},
++        ${"processing"},
++        ${"processing"},
++        ${journalPath},
++        ${leaseOwner},
++        ${now.toISOString()},
++        ${leaseExpiresAt.toISOString()},
++        ${now.toISOString()},
++        ${now.toISOString()}
++      )
++    `;
++
++    const row = await selectJournalForSignalOrKey(
++      tx,
++      input.signal.signal_id,
++      preparedSnapshotId,
++      idempotencyKey,
++    );
++    if (!row) {
++      throw new Error("execution journal claim insert did not produce a readable row");
++    }
++
++    if (row.state !== "processing") {
++      return { kind: "terminal" as const, row };
++    }
++
++    if (row.lease_owner === leaseOwner) {
++      return { kind: "claimed" as const, row, leaseOwner };
++    }
++
++    if (isLeaseExpired(row, now)) {
++      await markProcessingErrorInTx(tx, row.journal_id, FLOW_STALE_IN_FLIGHT_REASON, null, now);
++      const staleRow = await selectJournalById(tx, row.journal_id);
++      if (!staleRow) {
++        throw new Error("stale execution journal row disappeared after update");
++      }
++      return { kind: "stale_marked_processing_error" as const, row: staleRow };
++    }
++
++    return { kind: "already_processing" as const, row };
++  });
++}
++
++export async function completeFlowExecutionJournalInDb(input: {
++  journalId: string;
++  leaseOwner: string;
++  journal: ExecutionJournal;
++  now?: Date;
++}): Promise<ExecutionJournalRow> {
++  const now = input.now ?? new Date();
++  const state = input.journal.risk_decision === "accepted" ? "accepted" : "rejected";
++  await db.$executeRaw`
++    UPDATE execution_journal
++    SET
++      risk_config_json = ${json(input.journal.risk_config)},
++      risk_checks_json = ${json(input.journal.risk_checks)},
++      risk_decision = ${input.journal.risk_decision},
++      reject_reason = ${input.journal.reject_reason},
++      dry_run_order_json = ${input.journal.dry_run_order ? json(input.journal.dry_run_order) : null},
++      live_execution_enabled = ${false},
++      state = ${state},
++      outcome = ${input.journal.outcome},
++      error_reason = NULL,
++      error_message = NULL,
++      journal_path = ${input.journal.journal_path},
++      lease_owner = NULL,
++      lease_claimed_at = NULL,
++      lease_expires_at = NULL,
++      updated_at = ${now.toISOString()},
++      completed_at = ${now.toISOString()}
++    WHERE journal_id = ${input.journalId}
++      AND lease_owner = ${input.leaseOwner}
++      AND state = 'processing'
++  `;
++
++  const row = await getFlowExecutionJournalById(input.journalId);
++  if (!row) {
++    throw new Error("execution journal row missing after completion");
++  }
++  return row;
++}
++
++export async function markFlowExecutionJournalProcessingError(input: {
++  journalId: string;
++  leaseOwner: string;
++  reason: string;
++  message?: string;
++  now?: Date;
++}): Promise<ExecutionJournalRow> {
++  const now = input.now ?? new Date();
++  await db.$executeRaw`
++    UPDATE execution_journal
++    SET
++      state = ${"processing_error"},
++      outcome = ${"processing_error"},
++      risk_decision = NULL,
++      reject_reason = ${input.reason},
++      error_reason = ${input.reason},
++      error_message = ${input.message ?? null},
++      live_execution_enabled = ${false},
++      lease_owner = NULL,
++      lease_claimed_at = NULL,
++      lease_expires_at = NULL,
++      updated_at = ${now.toISOString()},
++      completed_at = ${now.toISOString()}
++    WHERE journal_id = ${input.journalId}
++      AND lease_owner = ${input.leaseOwner}
++      AND state = 'processing'
++  `;
++
++  const row = await getFlowExecutionJournalById(input.journalId);
++  if (!row) {
++    throw new Error("execution journal row missing after processing error");
++  }
++  return row;
++}
++
++export async function persistInvalidFlowExecutionJournal(input: {
++  rawPayload: unknown;
++  idempotencyKey?: string;
++  reason: string;
++  message?: string;
++  now?: Date;
++}): Promise<ExecutionJournalRow> {
++  const now = input.now ?? new Date();
++  const idempotencyKey =
++    input.idempotencyKey ?? `invalid_payload:${hashJson(input.rawPayload).slice(0, 32)}`;
++  const journalId = createDbJournalId(idempotencyKey, now);
++
++  await db.$executeRaw`
++    INSERT OR IGNORE INTO execution_journal (
++      journal_id,
++      idempotency_key,
++      raw_payload_json,
++      live_execution_enabled,
++      state,
++      outcome,
++      reject_reason,
++      error_reason,
++      error_message,
++      created_at,
++      updated_at,
++      completed_at
++    ) VALUES (
++      ${journalId},
++      ${idempotencyKey},
++      ${json(input.rawPayload)},
++      ${false},
++      ${"invalid_payload"},
++      ${"invalid_payload"},
++      ${input.reason},
++      ${input.reason},
++      ${input.message ?? null},
++      ${now.toISOString()},
++      ${now.toISOString()},
++      ${now.toISOString()}
++    )
++  `;
++
++  const row = await selectJournalForSignalOrKey(db, null, null, idempotencyKey);
++  if (!row) {
++    throw new Error("invalid execution journal row missing after insert");
++  }
++  return row;
++}
++
++export async function getFlowExecutionJournalById(
++  journalId: string,
++): Promise<ExecutionJournalRow | null> {
++  return selectJournalById(db, journalId);
++}
++
++export async function listSeenFlowTokenMintsFromDb(excludeSignalId?: string): Promise<string[]> {
++  const rows = await db.$queryRaw<Array<{ token_mint: string }>>`
++    SELECT DISTINCT token_mint
++    FROM execution_journal
++    WHERE token_mint IS NOT NULL
++      AND state IN ('accepted', 'rejected')
++      AND (${excludeSignalId ?? null} IS NULL OR flow_signal_id != ${excludeSignalId})
++  `;
++  return rows.map((row) => row.token_mint);
++}
++
++export async function exportExecutionJournalFromDbRow(
++  row: ExecutionJournalRow,
++): Promise<ExecutionJournal | null> {
++  if (row.state !== "accepted" && row.state !== "rejected") {
++    return null;
++  }
++  if (
++    !row.journal_path ||
++    !row.normalized_signal_json ||
++    !row.price_liquidity_snapshot_json ||
++    !row.risk_config_json ||
++    !row.risk_checks_json ||
++    !row.risk_decision
++  ) {
++    throw new Error(`execution journal ${row.journal_id} is missing terminal journal fields`);
++  }
++
++  const journal = ExecutionJournalSchema.parse({
++    journal_id: row.journal_id,
++    journal_path: row.journal_path,
++    idempotency_key: row.idempotency_key,
++    created_at: toIsoString(row.created_at),
++    signal: parseJson(row.normalized_signal_json),
++    risk_config: parseJson(row.risk_config_json),
++    risk_checks: parseJson(row.risk_checks_json),
++    risk_decision: row.risk_decision,
++    reject_reason: row.reject_reason,
++    price_liquidity_snapshot: parseJson(row.price_liquidity_snapshot_json),
++    live_execution_enabled: false,
++    dry_run_order: row.dry_run_order_json ? parseJson(row.dry_run_order_json) : null,
++    outcome: row.outcome,
++  });
++
++  await mkdir(path.dirname(journal.journal_path), { recursive: true });
++  await writeFile(journal.journal_path, `${JSON.stringify(journal, null, 2)}\n`, "utf8");
++  return journal;
++}
++
++type Queryable = Pick<typeof db, "$queryRaw" | "$executeRaw">;
++
++async function selectJournalForSignalOrKey(
++  tx: Queryable,
++  flowSignalId: string | null,
++  preparedSnapshotId: string | null,
++  idempotencyKey?: string,
++): Promise<ExecutionJournalRow | null> {
++  const rows = await tx.$queryRaw<ExecutionJournalRow[]>`
++    SELECT *
++    FROM execution_journal
++    WHERE (${flowSignalId} IS NOT NULL AND flow_signal_id = ${flowSignalId})
++       OR (${preparedSnapshotId} IS NOT NULL AND prepared_snapshot_id = ${preparedSnapshotId})
++       OR (${idempotencyKey ?? null} IS NOT NULL AND idempotency_key = ${idempotencyKey ?? null})
++    ORDER BY created_at ASC
++    LIMIT 1
++  `;
++  return rows[0] ?? null;
++}
++
++async function selectJournalById(
++  tx: Queryable,
++  journalId: string,
++): Promise<ExecutionJournalRow | null> {
++  const rows = await tx.$queryRaw<ExecutionJournalRow[]>`
++    SELECT *
++    FROM execution_journal
++    WHERE journal_id = ${journalId}
++    LIMIT 1
++  `;
++  return rows[0] ?? null;
++}
++
++async function markProcessingErrorInTx(
++  tx: Queryable,
++  journalId: string,
++  reason: string,
++  message: string | null,
++  now: Date,
++): Promise<void> {
++  await tx.$executeRaw`
++    UPDATE execution_journal
++    SET
++      state = ${"processing_error"},
++      outcome = ${"processing_error"},
++      reject_reason = ${reason},
++      error_reason = ${reason},
++      error_message = ${message},
++      live_execution_enabled = ${false},
++      lease_owner = NULL,
++      lease_claimed_at = NULL,
++      lease_expires_at = NULL,
++      updated_at = ${now.toISOString()},
++      completed_at = ${now.toISOString()}
++    WHERE journal_id = ${journalId}
++      AND state = 'processing'
++  `;
++}
++
++function isLeaseExpired(row: ExecutionJournalRow, now: Date): boolean {
++  if (!row.lease_expires_at) return true;
++  return new Date(row.lease_expires_at).getTime() <= now.getTime();
++}
++
++function createDbJournalId(seed: string, now: Date): string {
++  const digest = createHash("sha256")
++    .update(`${seed}:${now.toISOString()}:${randomUUID()}`)
++    .digest("hex")
++    .slice(0, 16);
++  return `flow-dry-run-${digest}`;
++}
++
++function json(value: unknown): string {
++  return JSON.stringify(value);
++}
++
++function hashJson(value: unknown): string {
++  return createHash("sha256").update(json(value)).digest("hex");
++}
++
++function parseJson(value: string): unknown {
++  return JSON.parse(value) as unknown;
++}
++
++function toIsoString(value: string | Date): string {
++  return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
++}
+diff --git a/src/webhook/routes.ts b/src/webhook/routes.ts
+index 72d1f2c..138d6b2 100644
+--- a/src/webhook/routes.ts
++++ b/src/webhook/routes.ts
+@@ -11,14 +11,20 @@ import {
+ import { config } from "../config.js";
+ import { executeSignal } from "../executor/index.js";
+ import {
+-  claimFlowExecutionJournal,
+   extractFlowDryRunHttpPayload,
+   normalizeFlowSignal,
+-  readExistingFlowExecutionJournal,
+-  releaseFlowExecutionJournalClaim,
+   runFlowDryRun,
+   writeFlowDryRunAttempt,
+ } from "../flow/dry-run.js";
++import {
++  claimFlowExecutionJournalInDb,
++  completeFlowExecutionJournalInDb,
++  exportExecutionJournalFromDbRow,
++  listSeenFlowTokenMintsFromDb,
++  markFlowExecutionJournalProcessingError,
++  persistInvalidFlowExecutionJournal,
++  type ExecutionJournalRow,
++} from "../flow/execution-journal-db.js";
+ import type { ExecutionJournal, FlowRiskConfig, FlowSignalArtifact } from "../flow/schemas.js";
+ import { runBlockers, runTripwires } from "../risk/index.js";
+ import { getSolanaRpc, getTradingSigner } from "../solana/runtime.js";
+@@ -53,9 +59,13 @@ type TripwireCheck = (
+ ) => Promise<{ triggered: string[] }>;
+ type FlowDryRunProcessor = (payload: {
+   rawSignal: unknown;
++  idempotencyKey?: string;
+   riskConfig?: Partial<FlowRiskConfig>;
+   journalDir: string;
+   now?: Date;
++  includeFileSeenTokenMints?: boolean;
++  writeJsonExport?: boolean;
++  writeAttemptArtifact?: boolean;
+ }) => Promise<ExecutionJournal>;
+ 
+ export async function registerRoutes(
+@@ -274,51 +284,61 @@ export async function registerRoutes(
+       signal = normalizeFlowSignal(httpPayload.rawSignal);
+     } catch (error) {
+       logger.warn({ err: error, signal_id: null }, "flow dry-run intake rejected");
++      const idempotencyKey = extractInvalidPayloadIdempotencyKey(
++        request.body,
++        headerIdempotencyKey,
++      );
++      await persistInvalidFlowExecutionJournal({
++        rawPayload: request.body,
++        idempotencyKey,
++        reason: "invalid_payload",
++        message: error instanceof Error ? error.message : String(error),
++        now,
++      });
+       await writeFlowDryRunAttempt(flowJournalDir, {
+         status: "invalid_payload",
+         signal_id: "unknown",
+-        idempotency_key: headerIdempotencyKey,
++        idempotency_key: idempotencyKey,
++        reject_reason: "invalid_payload",
+         error: error instanceof Error ? error.message : String(error),
+         live_execution_enabled: false,
+         created_at: now.toISOString(),
+       });
+       return reply.code(400).send({
+         error: "invalid flow payload",
++        reason: "invalid_payload",
+         signal_id: null,
+         live_execution_enabled: false,
+       });
+     }
+     const signalId = signal.signal_id;
+-    let claim: Awaited<ReturnType<typeof claimFlowExecutionJournal>> | null = null;
++    let claim: Awaited<ReturnType<typeof claimFlowExecutionJournalInDb>> | null = null;
+ 
+     try {
+-      const existing = await readExistingFlowExecutionJournal(flowJournalDir, signal.signal_id);
+-      if (existing) {
+-        const response = buildFlowDryRunResponse("already_processed", existing);
++      claim = await claimFlowExecutionJournalInDb({
++        signal,
++        rawPayload: request.body,
++        idempotencyKey: httpPayload.idempotencyKey,
++        journalDir: flowJournalDir,
++        now,
++      });
++
++      if (claim.kind === "terminal") {
++        const response = await buildFlowDryRunResponseFromDbRow("already_processed", claim.row);
+         await writeFlowDryRunAttempt(flowJournalDir, {
+           ...response,
+           idempotency_key: httpPayload.idempotencyKey,
+           created_at: now.toISOString(),
+         });
+-        return reply.code(200).send(response);
++        return reply.code(response.status === "processing_error" ? 500 : 200).send(response);
+       }
+ 
+-      claim = await claimFlowExecutionJournal(flowJournalDir, signal.signal_id, now);
+-      if (!claim.claimed) {
+-        const prior = await readExistingFlowExecutionJournal(flowJournalDir, signal.signal_id);
+-        if (prior) {
+-          const response = buildFlowDryRunResponse("already_processed", prior);
+-          await writeFlowDryRunAttempt(flowJournalDir, {
+-            ...response,
+-            idempotency_key: httpPayload.idempotencyKey,
+-            created_at: now.toISOString(),
+-          });
+-          return reply.code(200).send(response);
+-        }
+-
++      if (claim.kind === "already_processing") {
+         const response = {
+           status: "already_processing",
++          state: "processing",
+           signal_id: signal.signal_id,
++          journal_id: claim.row.journal_id,
+           schema_version: httpPayload.schemaVersion,
+           idempotency_key: httpPayload.idempotencyKey,
+           live_execution_enabled: false,
+@@ -330,6 +350,16 @@ export async function registerRoutes(
+         return reply.code(202).send(response);
+       }
+ 
++      if (claim.kind === "stale_marked_processing_error") {
++        const response = await buildFlowDryRunResponseFromDbRow("processing_error", claim.row);
++        await writeFlowDryRunAttempt(flowJournalDir, {
++          ...response,
++          idempotency_key: httpPayload.idempotencyKey,
++          created_at: now.toISOString(),
++        });
++        return reply.code(500).send(response);
++      }
++
+       await writeFlowDryRunAttempt(flowJournalDir, {
+         status: "flow_dry_run_received",
+         signal_id: signal.signal_id,
+@@ -340,35 +370,57 @@ export async function registerRoutes(
+         created_at: now.toISOString(),
+       });
+ 
++      const seenTokenMints = await listSeenFlowTokenMintsFromDb(signal.signal_id);
+       const journal = await flowDryRunProcessor({
+         rawSignal: httpPayload.rawSignal,
+         idempotencyKey: httpPayload.idempotencyKey,
++        riskConfig: { seen_token_mints: seenTokenMints },
+         journalDir: flowJournalDir,
+         now,
++        includeFileSeenTokenMints: false,
++        writeJsonExport: false,
++        writeAttemptArtifact: false,
+       });
++      const completed = await completeFlowExecutionJournalInDb({
++        journalId: claim.row.journal_id,
++        leaseOwner: claim.leaseOwner,
++        journal,
++        now,
++      });
++      const exportedJournal = await exportExecutionJournalFromDbRow(completed);
++      if (!exportedJournal) {
++        throw new Error(`completed execution journal is not exportable: ${completed.journal_id}`);
++      }
+       const status =
+-        journal.risk_decision === "accepted" ? "dry_run_accepted" : "dry_run_rejected";
+-      return reply.code(200).send(buildFlowDryRunResponse(status, journal));
++        exportedJournal.risk_decision === "accepted" ? "dry_run_accepted" : "dry_run_rejected";
++      return reply.code(200).send(buildFlowDryRunResponse(status, exportedJournal));
+     } catch (error) {
+       logger.error({ err: error, signal_id: signalId }, "flow dry-run intake failed");
++      if (claim?.kind === "claimed") {
++        await markFlowExecutionJournalProcessingError({
++          journalId: claim.row.journal_id,
++          leaseOwner: claim.leaseOwner,
++          reason: "processing_error",
++          message: error instanceof Error ? error.message : String(error),
++          now,
++        });
++      }
+       await writeFlowDryRunAttempt(flowJournalDir, {
+         status: "processing_error",
+         signal_id: signalId,
+         schema_version: httpPayload.schemaVersion,
+         idempotency_key: httpPayload.idempotencyKey,
++        reject_reason: "processing_error",
+         error: error instanceof Error ? error.message : String(error),
+         live_execution_enabled: false,
+         created_at: now.toISOString(),
+       });
+       return reply.code(500).send({
+         error: "flow dry-run processing failed",
++        reason: "processing_error",
+         signal_id: signalId,
+         live_execution_enabled: false,
+       });
+-    } finally {
+-      if (claim?.claimed) {
+-        await releaseFlowExecutionJournalClaim(claim.lockPath);
+-      }
+     }
+   });
+ }
+@@ -391,6 +443,45 @@ function buildFlowDryRunResponse(
+   };
+ }
+ 
++async function buildFlowDryRunResponseFromDbRow(
++  duplicateStatus: "already_processed" | "processing_error",
++  row: ExecutionJournalRow,
++) {
++  const journal = await exportExecutionJournalFromDbRow(row);
++  if (journal) {
++    return buildFlowDryRunResponse(
++      duplicateStatus === "already_processed" ? duplicateStatus : "already_processed",
++      journal,
++    );
++  }
++
++  return {
++    schema_version: "flow_dry_run_v1",
++    status: row.state === "processing_error" ? "processing_error" : row.state,
++    idempotency_key: row.idempotency_key ?? undefined,
++    signal_id: row.flow_signal_id,
++    journal_id: row.journal_id,
++    journal_path: row.journal_path,
++    state: row.state,
++    risk_decision: row.risk_decision,
++    reject_reason: row.reject_reason ?? row.error_reason,
++    reason: row.error_reason ?? row.reject_reason,
++    live_execution_enabled: false,
++    dry_run_order: null,
++  };
++}
++
++function extractInvalidPayloadIdempotencyKey(
++  body: unknown,
++  headerIdempotencyKey?: string,
++): string | undefined {
++  if (body && typeof body === "object" && "idempotency_key" in body) {
++    const value = (body as { idempotency_key?: unknown }).idempotency_key;
++    return typeof value === "string" && value.length > 0 ? value : headerIdempotencyKey;
++  }
++  return headerIdempotencyKey;
++}
++
+ async function checkSolanaHealth(): Promise<{ rpcOk: boolean; walletSol: number }> {
+   const rpc = getSolanaRpc();
+   const signer = await getTradingSigner();
+diff --git a/tests/flow-dry-run-intake.test.ts b/tests/flow-dry-run-intake.test.ts
+index a0ee132..dc25177 100644
+--- a/tests/flow-dry-run-intake.test.ts
++++ b/tests/flow-dry-run-intake.test.ts
+@@ -8,10 +8,18 @@ import type { FlowSignalArtifact } from "../src/flow/schemas.js";
+ 
+ const tokenMint = "So11111111111111111111111111111111111111112";
+ const flowSecret = "f".repeat(32);
+-const migrationSql = fs.readFileSync(
+-  path.resolve("prisma/migrations/20260423150934_init/migration.sql"),
+-  "utf8",
+-);
++const migrationSql = fs
++  .readdirSync(path.resolve("prisma/migrations"), { withFileTypes: true })
++  .filter(
++    (entry) =>
++      entry.isDirectory() &&
++      fs.existsSync(path.resolve("prisma/migrations", entry.name, "migration.sql")),
++  )
++  .sort((a, b) => a.name.localeCompare(b.name))
++  .map((entry) =>
++    fs.readFileSync(path.resolve("prisma/migrations", entry.name, "migration.sql"), "utf8"),
++  )
++  .join("\n");
+ 
+ function sign(secret: string, timestamp: number, body: string): string {
+   return createHmac("sha256", secret)
+@@ -84,6 +92,7 @@ async function makeApp(options?: { flowDryRunProcessor?: unknown }) {
+ 
+   return {
+     app,
++    dbPath,
+     journalDir,
+     processSignal,
+     async cleanup() {
+@@ -135,10 +144,21 @@ describe("Flow dry-run HTTP intake", () => {
+       expect(response.statusCode).toBe(400);
+       expect(response.json()).toEqual({
+         error: "invalid flow payload",
++        reason: "invalid_payload",
+         signal_id: null,
+         live_execution_enabled: false,
+       });
+       expect(fs.readdirSync(path.join(ctx.journalDir, "attempts"))).toHaveLength(1);
++      const sqlite = new Database(ctx.dbPath, { readonly: true });
++      const row = sqlite
++        .prepare("SELECT state, reject_reason, live_execution_enabled FROM execution_journal")
++        .get() as { state: string; reject_reason: string; live_execution_enabled: number };
++      sqlite.close();
++      expect(row).toEqual({
++        state: "invalid_payload",
++        reject_reason: "invalid_payload",
++        live_execution_enabled: 0,
++      });
+       expect(ctx.processSignal).not.toHaveBeenCalled();
+     } finally {
+       await ctx.cleanup();
+@@ -161,6 +181,33 @@ describe("Flow dry-run HTTP intake", () => {
+         }),
+       );
+       expect(fs.existsSync(response.json().journal_path)).toBe(true);
++      const sqlite = new Database(ctx.dbPath, { readonly: true });
++      const row = sqlite
++        .prepare(
++          "SELECT flow_signal_id, idempotency_key, state, risk_decision, reject_reason, dry_run_order_json, live_execution_enabled FROM execution_journal WHERE flow_signal_id = ?",
++        )
++        .get("flow-http-signal-1") as {
++        flow_signal_id: string;
++        idempotency_key: string;
++        state: string;
++        risk_decision: string;
++        reject_reason: string | null;
++        dry_run_order_json: string;
++        live_execution_enabled: number;
++      };
++      sqlite.close();
++      expect(row).toEqual(
++        expect.objectContaining({
++          flow_signal_id: "flow-http-signal-1",
++          state: "accepted",
++          risk_decision: "accepted",
++          reject_reason: null,
++          live_execution_enabled: 0,
++        }),
++      );
++      expect(JSON.parse(row.dry_run_order_json)).toEqual(
++        expect.objectContaining({ token_mint: tokenMint, live_execution_enabled: false }),
++      );
+       expect(ctx.processSignal).not.toHaveBeenCalled();
+     } finally {
+       await ctx.cleanup();
+@@ -250,6 +297,22 @@ describe("Flow dry-run HTTP intake", () => {
+           live_execution_enabled: false,
+         }),
+       );
++      const sqlite = new Database(ctx.dbPath, { readonly: true });
++      const row = sqlite
++        .prepare(
++          "SELECT state, risk_decision, reject_reason FROM execution_journal WHERE flow_signal_id = ?",
++        )
++        .get("flow-http-signal-reject") as {
++        state: string;
++        risk_decision: string;
++        reject_reason: string;
++      };
++      sqlite.close();
++      expect(row).toEqual({
++        state: "rejected",
++        risk_decision: "rejected",
++        reject_reason: "missing_price_data",
++      });
+       expect(ctx.processSignal).not.toHaveBeenCalled();
+     } finally {
+       await ctx.cleanup();
+@@ -257,7 +320,11 @@ describe("Flow dry-run HTTP intake", () => {
+   });
+ 
+   it("returns the prior journal on duplicate delivery without reprocessing", async () => {
+-    const ctx = await makeApp();
++    const { runFlowDryRun } = await import("../src/flow/dry-run.js");
++    const flowDryRunProcessor = vi.fn(async (input: Parameters<typeof runFlowDryRun>[0]) =>
++      runFlowDryRun(input),
++    );
++    const ctx = await makeApp({ flowDryRunProcessor });
+     try {
+       const first = await postFlowSignal(ctx.app, makeEnvelope());
+       const second = await postFlowSignal(ctx.app, makeEnvelope());
+@@ -265,13 +332,93 @@ describe("Flow dry-run HTTP intake", () => {
+       expect(first.statusCode).toBe(200);
+       expect(second.statusCode).toBe(200);
+       expect(second.json()).toEqual({ ...first.json(), status: "already_processed" });
+-      expect(fs.readdirSync(path.join(ctx.journalDir, "attempts"))).toHaveLength(3);
++      expect(fs.readdirSync(path.join(ctx.journalDir, "attempts"))).toHaveLength(2);
++      expect(flowDryRunProcessor).toHaveBeenCalledTimes(1);
+       expect(ctx.processSignal).not.toHaveBeenCalled();
+     } finally {
+       await ctx.cleanup();
+     }
+   });
+ 
++  it("deduplicates on prepared snapshot id even when signal and idempotency keys differ", async () => {
++    const { runFlowDryRun } = await import("../src/flow/dry-run.js");
++    const flowDryRunProcessor = vi.fn(async (input: Parameters<typeof runFlowDryRun>[0]) =>
++      runFlowDryRun(input),
++    );
++    const ctx = await makeApp({ flowDryRunProcessor });
++    try {
++      const firstSignal = makeSignal({
++        signal_id: "flow-http-signal-prepared-1",
++        flow: {
++          run_id: "44444444-4444-4444-8444-444444444444",
++          prepared_snapshot_id: "prepared-shared-1",
++        },
++      });
++      const secondSignal = makeSignal({
++        signal_id: "flow-http-signal-prepared-2",
++        flow: {
++          run_id: "55555555-5555-4555-8555-555555555555",
++          prepared_snapshot_id: "prepared-shared-1",
++        },
++      });
++
++      const first = await postFlowSignal(ctx.app, {
++        ...makeEnvelope(firstSignal),
++        idempotency_key: "signal_delivery:trader_bot:first-prepared-key",
++      });
++      const second = await postFlowSignal(ctx.app, {
++        ...makeEnvelope(secondSignal),
++        idempotency_key: "signal_delivery:trader_bot:second-prepared-key",
++      });
++
++      expect(first.statusCode).toBe(200);
++      expect(second.statusCode).toBe(200);
++      expect(second.json()).toEqual({ ...first.json(), status: "already_processed" });
++      expect(flowDryRunProcessor).toHaveBeenCalledTimes(1);
++    } finally {
++      await ctx.cleanup();
++    }
++  });
++
++  it("does not let existing JSON artifacts influence HTTP dry-run risk", async () => {
++    const { runFlowDryRun } = await import("../src/flow/dry-run.js");
++    const ctx = await makeApp();
++    try {
++      await runFlowDryRun({
++        rawSignal: makeSignal({
++          signal_id: "old-file-only-signal",
++          flow: {
++            run_id: "66666666-6666-4666-8666-666666666666",
++            prepared_snapshot_id: "old-file-only-signal",
++          },
++        }),
++        journalDir: ctx.journalDir,
++      });
++
++      const response = await postFlowSignal(
++        ctx.app,
++        makeSignal({
++          signal_id: "new-db-only-signal",
++          flow: {
++            run_id: "77777777-7777-4777-8777-777777777777",
++            prepared_snapshot_id: "new-db-only-signal",
++          },
++        }),
++      );
++
++      expect(response.statusCode).toBe(200);
++      expect(response.json()).toEqual(
++        expect.objectContaining({
++          status: "dry_run_accepted",
++          signal_id: "new-db-only-signal",
++          reject_reason: null,
++        }),
++      );
++    } finally {
++      await ctx.cleanup();
++    }
++  });
++
+   it("does not process concurrent duplicate deliveries twice", async () => {
+     let releaseProcessor!: () => void;
+     const processorHold = new Promise<void>((resolve) => {
+@@ -308,4 +455,97 @@ describe("Flow dry-run HTTP intake", () => {
+       await ctx.cleanup();
+     }
+   });
++
++  it("marks stale in-flight DB claims as processing_error without rerunning risk", async () => {
++    const { FLOW_EXECUTION_JOURNAL_LEASE_TIMEOUT_MS } = await import(
++      "../src/flow/execution-journal-db.js"
++    );
++    const flowDryRunProcessor = vi.fn();
++    const ctx = await makeApp({ flowDryRunProcessor });
++    try {
++      const signal = makeSignal();
++      const now = new Date();
++      const stale = new Date(now.getTime() - FLOW_EXECUTION_JOURNAL_LEASE_TIMEOUT_MS - 1_000);
++      const sqlite = new Database(ctx.dbPath);
++      sqlite
++        .prepare(
++          `INSERT INTO execution_journal (
++            journal_id, flow_signal_id, idempotency_key, token_mint, raw_payload_json,
++            normalized_signal_json, live_execution_enabled, state, outcome, journal_path,
++            lease_owner, lease_claimed_at, lease_expires_at, created_at, updated_at
++          ) VALUES (?, ?, ?, ?, ?, ?, 0, 'processing', 'processing', ?, ?, ?, ?, ?, ?)`,
++        )
++        .run(
++          "stale-journal-1",
++          signal.signal_id,
++          makeEnvelope(signal).idempotency_key,
++          signal.token_mint,
++          JSON.stringify(signal),
++          JSON.stringify(signal),
++          path.join(ctx.journalDir, `${signal.signal_id}.json`),
++          "old-lease",
++          stale.toISOString(),
++          stale.toISOString(),
++          stale.toISOString(),
++          stale.toISOString(),
++        );
++      sqlite.close();
++
++      const response = await postFlowSignal(ctx.app, makeEnvelope(signal));
++
++      expect(response.statusCode).toBe(500);
++      expect(response.json()).toEqual(
++        expect.objectContaining({
++          status: "processing_error",
++          signal_id: signal.signal_id,
++          reject_reason: "stale_in_flight_timeout",
++          live_execution_enabled: false,
++        }),
++      );
++      expect(flowDryRunProcessor).not.toHaveBeenCalled();
++      const readonly = new Database(ctx.dbPath, { readonly: true });
++      const row = readonly
++        .prepare("SELECT state, reject_reason FROM execution_journal WHERE journal_id = ?")
++        .get("stale-journal-1") as { state: string; reject_reason: string };
++      readonly.close();
++      expect(row).toEqual({
++        state: "processing_error",
++        reject_reason: "stale_in_flight_timeout",
++      });
++    } finally {
++      await ctx.cleanup();
++    }
++  });
++
++  it("persists processing errors with exact machine-readable reason", async () => {
++    const flowDryRunProcessor = vi.fn(async () => {
++      throw new Error("boom");
++    });
++    const ctx = await makeApp({ flowDryRunProcessor });
++    try {
++      const response = await postFlowSignal(ctx.app, makeEnvelope());
++
++      expect(response.statusCode).toBe(500);
++      expect(response.json()).toEqual({
++        error: "flow dry-run processing failed",
++        reason: "processing_error",
++        signal_id: "flow-http-signal-1",
++        live_execution_enabled: false,
++      });
++      const sqlite = new Database(ctx.dbPath, { readonly: true });
++      const row = sqlite
++        .prepare("SELECT state, reject_reason, error_reason FROM execution_journal")
++        .get() as { state: string; reject_reason: string; error_reason: string };
++      sqlite.close();
++      expect(row).toEqual({
++        state: "processing_error",
++        reject_reason: "processing_error",
++        error_reason: "processing_error",
++      });
++      expect(flowDryRunProcessor).toHaveBeenCalledTimes(1);
++      expect(ctx.processSignal).not.toHaveBeenCalled();
++    } finally {
++      await ctx.cleanup();
++    }
++  });
+ });
+diff --git a/tests/webhook.test.ts b/tests/webhook.test.ts
+index cc4e35f..e3e8cf4 100644
+--- a/tests/webhook.test.ts
++++ b/tests/webhook.test.ts
+@@ -5,10 +5,18 @@ import * as path from "node:path";
+ import Database from "better-sqlite3";
+ import { beforeEach, describe, expect, it, vi } from "vitest";
+ 
+-const migrationSql = fs.readFileSync(
+-  path.resolve("prisma/migrations/20260423150934_init/migration.sql"),
+-  "utf8",
+-);
++const migrationSql = fs
++  .readdirSync(path.resolve("prisma/migrations"), { withFileTypes: true })
++  .filter(
++    (entry) =>
++      entry.isDirectory() &&
++      fs.existsSync(path.resolve("prisma/migrations", entry.name, "migration.sql")),
++  )
++  .sort((a, b) => a.name.localeCompare(b.name))
++  .map((entry) =>
++    fs.readFileSync(path.resolve("prisma/migrations", entry.name, "migration.sql"), "utf8"),
++  )
++  .join("\n");
+ 
+ const mint = "So11111111111111111111111111111111111111112";
+ 

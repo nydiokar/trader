@@ -332,9 +332,88 @@ describe("Flow dry-run HTTP intake", () => {
       expect(first.statusCode).toBe(200);
       expect(second.statusCode).toBe(200);
       expect(second.json()).toEqual({ ...first.json(), status: "already_processed" });
-      expect(fs.readdirSync(path.join(ctx.journalDir, "attempts"))).toHaveLength(3);
+      expect(fs.readdirSync(path.join(ctx.journalDir, "attempts"))).toHaveLength(2);
       expect(flowDryRunProcessor).toHaveBeenCalledTimes(1);
       expect(ctx.processSignal).not.toHaveBeenCalled();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("deduplicates on prepared snapshot id even when signal and idempotency keys differ", async () => {
+    const { runFlowDryRun } = await import("../src/flow/dry-run.js");
+    const flowDryRunProcessor = vi.fn(async (input: Parameters<typeof runFlowDryRun>[0]) =>
+      runFlowDryRun(input),
+    );
+    const ctx = await makeApp({ flowDryRunProcessor });
+    try {
+      const firstSignal = makeSignal({
+        signal_id: "flow-http-signal-prepared-1",
+        flow: {
+          run_id: "44444444-4444-4444-8444-444444444444",
+          prepared_snapshot_id: "prepared-shared-1",
+        },
+      });
+      const secondSignal = makeSignal({
+        signal_id: "flow-http-signal-prepared-2",
+        flow: {
+          run_id: "55555555-5555-4555-8555-555555555555",
+          prepared_snapshot_id: "prepared-shared-1",
+        },
+      });
+
+      const first = await postFlowSignal(ctx.app, {
+        ...makeEnvelope(firstSignal),
+        idempotency_key: "signal_delivery:trader_bot:first-prepared-key",
+      });
+      const second = await postFlowSignal(ctx.app, {
+        ...makeEnvelope(secondSignal),
+        idempotency_key: "signal_delivery:trader_bot:second-prepared-key",
+      });
+
+      expect(first.statusCode).toBe(200);
+      expect(second.statusCode).toBe(200);
+      expect(second.json()).toEqual({ ...first.json(), status: "already_processed" });
+      expect(flowDryRunProcessor).toHaveBeenCalledTimes(1);
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("does not let existing JSON artifacts influence HTTP dry-run risk", async () => {
+    const { runFlowDryRun } = await import("../src/flow/dry-run.js");
+    const ctx = await makeApp();
+    try {
+      await runFlowDryRun({
+        rawSignal: makeSignal({
+          signal_id: "old-file-only-signal",
+          flow: {
+            run_id: "66666666-6666-4666-8666-666666666666",
+            prepared_snapshot_id: "old-file-only-signal",
+          },
+        }),
+        journalDir: ctx.journalDir,
+      });
+
+      const response = await postFlowSignal(
+        ctx.app,
+        makeSignal({
+          signal_id: "new-db-only-signal",
+          flow: {
+            run_id: "77777777-7777-4777-8777-777777777777",
+            prepared_snapshot_id: "new-db-only-signal",
+          },
+        }),
+      );
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual(
+        expect.objectContaining({
+          status: "dry_run_accepted",
+          signal_id: "new-db-only-signal",
+          reject_reason: null,
+        }),
+      );
     } finally {
       await ctx.cleanup();
     }

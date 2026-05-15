@@ -58,7 +58,7 @@ model ExecutionJournal {
   journalId                  String    @id @map("journal_id")
   flowSignalId               String?   @unique @map("flow_signal_id")
   flowRunId                  String?   @map("flow_run_id")
-  preparedSnapshotId         String?   @map("prepared_snapshot_id")
+  preparedSnapshotId         String?   @unique @map("prepared_snapshot_id")
   idempotencyKey             String    @unique @map("idempotency_key")
   tokenMint                  String?   @map("token_mint")
   sourceLane                 String?   @map("source_lane")
@@ -86,7 +86,6 @@ model ExecutionJournal {
   updatedAt                  DateTime  @updatedAt @map("updated_at")
   completedAt                DateTime? @map("completed_at")
 
-  @@index([preparedSnapshotId], name: "idx_execution_journal_prepared_snapshot_id")
   @@index([tokenMint], name: "idx_execution_journal_token_mint")
   @@index([state], name: "idx_execution_journal_state")
   @@map("execution_journal")

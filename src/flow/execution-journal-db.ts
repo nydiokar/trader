@@ -67,6 +67,7 @@ export async function claimFlowExecutionJournalInDb(input: {
   const leaseOwner = randomUUID();
   const leaseExpiresAt = new Date(now.getTime() + FLOW_EXECUTION_JOURNAL_LEASE_TIMEOUT_MS);
   const idempotencyKey = input.idempotencyKey ?? `flow_dry_run:${input.signal.signal_id}`;
+  const preparedSnapshotId = input.signal.flow.prepared_snapshot_id ?? null;
   const journalId = createDbJournalId(input.signal.signal_id, now);
   const journalPath = getFlowExecutionJournalPath(input.journalDir, input.signal.signal_id);
 
@@ -97,7 +98,7 @@ export async function claimFlowExecutionJournalInDb(input: {
         ${journalId},
         ${input.signal.signal_id},
         ${input.signal.flow.run_id ?? null},
-        ${input.signal.flow.prepared_snapshot_id ?? null},
+        ${preparedSnapshotId},
         ${idempotencyKey},
         ${input.signal.token_mint},
         ${input.signal.source_lane},
@@ -120,6 +121,7 @@ export async function claimFlowExecutionJournalInDb(input: {
     const row = await selectJournalForSignalOrKey(
       tx,
       input.signal.signal_id,
+      preparedSnapshotId,
       idempotencyKey,
     );
     if (!row) {
@@ -263,7 +265,7 @@ export async function persistInvalidFlowExecutionJournal(input: {
     )
   `;
 
-  const row = await selectJournalForSignalOrKey(db, null, idempotencyKey);
+  const row = await selectJournalForSignalOrKey(db, null, null, idempotencyKey);
   if (!row) {
     throw new Error("invalid execution journal row missing after insert");
   }
@@ -330,12 +332,14 @@ type Queryable = Pick<typeof db, "$queryRaw" | "$executeRaw">;
 async function selectJournalForSignalOrKey(
   tx: Queryable,
   flowSignalId: string | null,
+  preparedSnapshotId: string | null,
   idempotencyKey?: string,
 ): Promise<ExecutionJournalRow | null> {
   const rows = await tx.$queryRaw<ExecutionJournalRow[]>`
     SELECT *
     FROM execution_journal
     WHERE (${flowSignalId} IS NOT NULL AND flow_signal_id = ${flowSignalId})
+       OR (${preparedSnapshotId} IS NOT NULL AND prepared_snapshot_id = ${preparedSnapshotId})
        OR (${idempotencyKey ?? null} IS NOT NULL AND idempotency_key = ${idempotencyKey ?? null})
     ORDER BY created_at ASC
     LIMIT 1
