@@ -11,14 +11,20 @@ import {
 import { config } from "../config.js";
 import { executeSignal } from "../executor/index.js";
 import {
-  claimFlowExecutionJournal,
   extractFlowDryRunHttpPayload,
   normalizeFlowSignal,
-  readExistingFlowExecutionJournal,
-  releaseFlowExecutionJournalClaim,
   runFlowDryRun,
   writeFlowDryRunAttempt,
 } from "../flow/dry-run.js";
+import {
+  claimFlowExecutionJournalInDb,
+  completeFlowExecutionJournalInDb,
+  exportExecutionJournalFromDbRow,
+  listSeenFlowTokenMintsFromDb,
+  markFlowExecutionJournalProcessingError,
+  persistInvalidFlowExecutionJournal,
+  type ExecutionJournalRow,
+} from "../flow/execution-journal-db.js";
 import type { ExecutionJournal, FlowRiskConfig, FlowSignalArtifact } from "../flow/schemas.js";
 import { runBlockers, runTripwires } from "../risk/index.js";
 import { getSolanaRpc, getTradingSigner } from "../solana/runtime.js";
@@ -53,6 +59,7 @@ type TripwireCheck = (
 ) => Promise<{ triggered: string[] }>;
 type FlowDryRunProcessor = (payload: {
   rawSignal: unknown;
+  idempotencyKey?: string;
   riskConfig?: Partial<FlowRiskConfig>;
   journalDir: string;
   now?: Date;
@@ -274,51 +281,61 @@ export async function registerRoutes(
       signal = normalizeFlowSignal(httpPayload.rawSignal);
     } catch (error) {
       logger.warn({ err: error, signal_id: null }, "flow dry-run intake rejected");
+      const idempotencyKey = extractInvalidPayloadIdempotencyKey(
+        request.body,
+        headerIdempotencyKey,
+      );
+      await persistInvalidFlowExecutionJournal({
+        rawPayload: request.body,
+        idempotencyKey,
+        reason: "invalid_payload",
+        message: error instanceof Error ? error.message : String(error),
+        now,
+      });
       await writeFlowDryRunAttempt(flowJournalDir, {
         status: "invalid_payload",
         signal_id: "unknown",
-        idempotency_key: headerIdempotencyKey,
+        idempotency_key: idempotencyKey,
+        reject_reason: "invalid_payload",
         error: error instanceof Error ? error.message : String(error),
         live_execution_enabled: false,
         created_at: now.toISOString(),
       });
       return reply.code(400).send({
         error: "invalid flow payload",
+        reason: "invalid_payload",
         signal_id: null,
         live_execution_enabled: false,
       });
     }
     const signalId = signal.signal_id;
-    let claim: Awaited<ReturnType<typeof claimFlowExecutionJournal>> | null = null;
+    let claim: Awaited<ReturnType<typeof claimFlowExecutionJournalInDb>> | null = null;
 
     try {
-      const existing = await readExistingFlowExecutionJournal(flowJournalDir, signal.signal_id);
-      if (existing) {
-        const response = buildFlowDryRunResponse("already_processed", existing);
+      claim = await claimFlowExecutionJournalInDb({
+        signal,
+        rawPayload: request.body,
+        idempotencyKey: httpPayload.idempotencyKey,
+        journalDir: flowJournalDir,
+        now,
+      });
+
+      if (claim.kind === "terminal") {
+        const response = await buildFlowDryRunResponseFromDbRow("already_processed", claim.row);
         await writeFlowDryRunAttempt(flowJournalDir, {
           ...response,
           idempotency_key: httpPayload.idempotencyKey,
           created_at: now.toISOString(),
         });
-        return reply.code(200).send(response);
+        return reply.code(response.status === "processing_error" ? 500 : 200).send(response);
       }
 
-      claim = await claimFlowExecutionJournal(flowJournalDir, signal.signal_id, now);
-      if (!claim.claimed) {
-        const prior = await readExistingFlowExecutionJournal(flowJournalDir, signal.signal_id);
-        if (prior) {
-          const response = buildFlowDryRunResponse("already_processed", prior);
-          await writeFlowDryRunAttempt(flowJournalDir, {
-            ...response,
-            idempotency_key: httpPayload.idempotencyKey,
-            created_at: now.toISOString(),
-          });
-          return reply.code(200).send(response);
-        }
-
+      if (claim.kind === "already_processing") {
         const response = {
           status: "already_processing",
+          state: "processing",
           signal_id: signal.signal_id,
+          journal_id: claim.row.journal_id,
           schema_version: httpPayload.schemaVersion,
           idempotency_key: httpPayload.idempotencyKey,
           live_execution_enabled: false,
@@ -328,6 +345,16 @@ export async function registerRoutes(
           created_at: now.toISOString(),
         });
         return reply.code(202).send(response);
+      }
+
+      if (claim.kind === "stale_marked_processing_error") {
+        const response = await buildFlowDryRunResponseFromDbRow("processing_error", claim.row);
+        await writeFlowDryRunAttempt(flowJournalDir, {
+          ...response,
+          idempotency_key: httpPayload.idempotencyKey,
+          created_at: now.toISOString(),
+        });
+        return reply.code(500).send(response);
       }
 
       await writeFlowDryRunAttempt(flowJournalDir, {
@@ -340,35 +367,54 @@ export async function registerRoutes(
         created_at: now.toISOString(),
       });
 
+      const seenTokenMints = await listSeenFlowTokenMintsFromDb(signal.signal_id);
       const journal = await flowDryRunProcessor({
         rawSignal: httpPayload.rawSignal,
         idempotencyKey: httpPayload.idempotencyKey,
+        riskConfig: { seen_token_mints: seenTokenMints },
         journalDir: flowJournalDir,
         now,
       });
+      const completed = await completeFlowExecutionJournalInDb({
+        journalId: claim.row.journal_id,
+        leaseOwner: claim.leaseOwner,
+        journal,
+        now,
+      });
+      const exportedJournal = await exportExecutionJournalFromDbRow(completed);
+      if (!exportedJournal) {
+        throw new Error(`completed execution journal is not exportable: ${completed.journal_id}`);
+      }
       const status =
-        journal.risk_decision === "accepted" ? "dry_run_accepted" : "dry_run_rejected";
-      return reply.code(200).send(buildFlowDryRunResponse(status, journal));
+        exportedJournal.risk_decision === "accepted" ? "dry_run_accepted" : "dry_run_rejected";
+      return reply.code(200).send(buildFlowDryRunResponse(status, exportedJournal));
     } catch (error) {
       logger.error({ err: error, signal_id: signalId }, "flow dry-run intake failed");
+      if (claim?.kind === "claimed") {
+        await markFlowExecutionJournalProcessingError({
+          journalId: claim.row.journal_id,
+          leaseOwner: claim.leaseOwner,
+          reason: "processing_error",
+          message: error instanceof Error ? error.message : String(error),
+          now,
+        });
+      }
       await writeFlowDryRunAttempt(flowJournalDir, {
         status: "processing_error",
         signal_id: signalId,
         schema_version: httpPayload.schemaVersion,
         idempotency_key: httpPayload.idempotencyKey,
+        reject_reason: "processing_error",
         error: error instanceof Error ? error.message : String(error),
         live_execution_enabled: false,
         created_at: now.toISOString(),
       });
       return reply.code(500).send({
         error: "flow dry-run processing failed",
+        reason: "processing_error",
         signal_id: signalId,
         live_execution_enabled: false,
       });
-    } finally {
-      if (claim?.claimed) {
-        await releaseFlowExecutionJournalClaim(claim.lockPath);
-      }
     }
   });
 }
@@ -389,6 +435,45 @@ function buildFlowDryRunResponse(
     live_execution_enabled: false,
     dry_run_order: journal.dry_run_order,
   };
+}
+
+async function buildFlowDryRunResponseFromDbRow(
+  duplicateStatus: "already_processed" | "processing_error",
+  row: ExecutionJournalRow,
+) {
+  const journal = await exportExecutionJournalFromDbRow(row);
+  if (journal) {
+    return buildFlowDryRunResponse(
+      duplicateStatus === "already_processed" ? duplicateStatus : "already_processed",
+      journal,
+    );
+  }
+
+  return {
+    schema_version: "flow_dry_run_v1",
+    status: row.state === "processing_error" ? "processing_error" : row.state,
+    idempotency_key: row.idempotency_key ?? undefined,
+    signal_id: row.flow_signal_id,
+    journal_id: row.journal_id,
+    journal_path: row.journal_path,
+    state: row.state,
+    risk_decision: row.risk_decision,
+    reject_reason: row.reject_reason ?? row.error_reason,
+    reason: row.error_reason ?? row.reject_reason,
+    live_execution_enabled: false,
+    dry_run_order: null,
+  };
+}
+
+function extractInvalidPayloadIdempotencyKey(
+  body: unknown,
+  headerIdempotencyKey?: string,
+): string | undefined {
+  if (body && typeof body === "object" && "idempotency_key" in body) {
+    const value = (body as { idempotency_key?: unknown }).idempotency_key;
+    return typeof value === "string" && value.length > 0 ? value : headerIdempotencyKey;
+  }
+  return headerIdempotencyKey;
 }
 
 async function checkSolanaHealth(): Promise<{ rpcOk: boolean; walletSol: number }> {

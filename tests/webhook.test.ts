@@ -5,10 +5,18 @@ import * as path from "node:path";
 import Database from "better-sqlite3";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const migrationSql = fs.readFileSync(
-  path.resolve("prisma/migrations/20260423150934_init/migration.sql"),
-  "utf8",
-);
+const migrationSql = fs
+  .readdirSync(path.resolve("prisma/migrations"), { withFileTypes: true })
+  .filter(
+    (entry) =>
+      entry.isDirectory() &&
+      fs.existsSync(path.resolve("prisma/migrations", entry.name, "migration.sql")),
+  )
+  .sort((a, b) => a.name.localeCompare(b.name))
+  .map((entry) =>
+    fs.readFileSync(path.resolve("prisma/migrations", entry.name, "migration.sql"), "utf8"),
+  )
+  .join("\n");
 
 const mint = "So11111111111111111111111111111111111111112";
 

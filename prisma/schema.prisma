@@ -52,6 +52,46 @@ model Trade {
   @@map("trades")
 }
 
+// Flow dry-run pre-execution journal. DB is the durable idempotency record;
+// JSON files are rebuilt operator artifacts.
+model ExecutionJournal {
+  journalId                  String    @id @map("journal_id")
+  flowSignalId               String?   @unique @map("flow_signal_id")
+  flowRunId                  String?   @map("flow_run_id")
+  preparedSnapshotId         String?   @map("prepared_snapshot_id")
+  idempotencyKey             String    @unique @map("idempotency_key")
+  tokenMint                  String?   @map("token_mint")
+  sourceLane                 String?   @map("source_lane")
+  signalReason               String?   @map("signal_reason")
+  rawPayloadJson             String    @map("raw_payload_json")
+  normalizedSignalJson       String?   @map("normalized_signal_json")
+  priceLiquiditySnapshotJson String?   @map("price_liquidity_snapshot_json")
+  riskConfigJson             String?   @map("risk_config_json")
+  riskChecksJson             String?   @map("risk_checks_json")
+  riskDecision               String?   @map("risk_decision")
+  rejectReason               String?   @map("reject_reason")
+  dryRunOrderJson            String?   @map("dry_run_order_json")
+  liveExecutionEnabled       Boolean   @default(false) @map("live_execution_enabled")
+  livePromotedAt             DateTime? @map("live_promoted_at")
+  tradeId                    Int?      @map("trade_id")
+  state                      String
+  outcome                    String
+  errorReason                String?   @map("error_reason")
+  errorMessage               String?   @map("error_message")
+  journalPath                String?   @map("journal_path")
+  leaseOwner                 String?   @map("lease_owner")
+  leaseClaimedAt             DateTime? @map("lease_claimed_at")
+  leaseExpiresAt             DateTime? @map("lease_expires_at")
+  createdAt                  DateTime  @default(now()) @map("created_at")
+  updatedAt                  DateTime  @updatedAt @map("updated_at")
+  completedAt                DateTime? @map("completed_at")
+
+  @@index([preparedSnapshotId], name: "idx_execution_journal_prepared_snapshot_id")
+  @@index([tokenMint], name: "idx_execution_journal_token_mint")
+  @@index([state], name: "idx_execution_journal_state")
+  @@map("execution_journal")
+}
+
 // Spec §4.1 — per-token blocklist
 model Blocklist {
   tokenMint String @id @map("token_mint")

@@ -1,6 +1,6 @@
 # Trader Bot - Project Context
 
-**Branch:** `main` | **Last Updated:** 2026-05-14 | **Status:** M0-M3 complete. M4-M5 core executor implemented with deterministic coverage; M6-M7 partially implemented; Flow-to-bot dry-run bridge Stage 1 complete and Stage 2/3 dry-run HTTP path implemented; live/staging acceptance remains blocked.
+**Branch:** `main` | **Last Updated:** 2026-05-14 | **Status:** M0-M3 complete. M4-M5 core executor implemented with deterministic coverage; M6-M7 partially implemented; Flow-to-bot dry-run bridge Stage 1 complete, Stage 2/3 dry-run HTTP path implemented, and Stage 4 DB-backed dry-run execution journal implemented; live/staging acceptance remains blocked.
 
 ---
 
@@ -128,16 +128,34 @@ Stage 2/3 verification evidence:
 - Flow `npm run typecheck:scripts` remains blocked by pre-existing unrelated script errors, including `scripts/general/verify-trigger-parse.ts`, `scripts/one-time/check-db.ts`, and several evaluation/test scripts. Source typecheck and the focused signal-delivery smoke test passed.
 - Local simulated Flow-to-trader delivery is covered by `tests/flow-dry-run-intake.test.ts`, which posts a Flow `PreparationOutput` shape to `/flow/dry-run-signal` and receives an accepted dry-run journal summary with `live_execution_enabled=false`.
 
-Stage 4 next tasks - production pre-execution foundation:
-- [ ] Add DB-backed `execution_journal` records while preserving JSON export.
-- [ ] Add journal idempotency keyed by Flow signal/prepared snapshot ID.
-- [ ] Replace the Stage 3 file-claim idempotency guard with DB-backed atomic idempotency and stale-claim recovery.
+Stage 4 progress - production pre-execution foundation:
+- [x] Add DB-backed `execution_journal` records while preserving JSON export.
+- [x] Add journal idempotency keyed by Flow signal/prepared snapshot ID and idempotency key.
+- [x] Replace the Stage 3 file-claim idempotency guard with DB-backed atomic idempotency and stale-claim handling.
+- [x] Persist accepted, rejected, invalid payload, and processing-error decisions with exact machine-readable reasons.
+- [x] Keep `/flow/dry-run-signal` live execution hard-disabled with `live_execution_enabled=false`.
+- [x] Preserve JSON journal files as operator artifacts rebuilt from completed DB journal rows.
 - [ ] Add replay tooling for recent Flow signals through bot risk.
 - [ ] Add bot-owned price/liquidity refresh before any live intent.
 - [ ] Wire bot alerts for accepted dry-run, rejected dry-run, and future execution uncertainty.
 - [ ] Add open-position state; stop relying only on prior journal/trade scan.
 - [ ] Define live execution promotion gates requiring bot config `live_execution_enabled=true`, `DRY_RUN=false`, kill switch off, wallet floor, fresh signal, and unused idempotency.
 - [ ] Only after those gates, map accepted dry-run order intent into the existing executor shape.
+
+Stage 4 implementation notes:
+- Added Prisma model/table `execution_journal` with unique `flow_signal_id` and `idempotency_key`, raw payload JSON, normalized signal JSON, price/liquidity snapshot, risk config/checks/decision, reject/error reasons, dry-run order JSON, state/outcome, timestamps, lease metadata, `journal_path`, and `live_execution_enabled=false`.
+- New migration: `prisma/migrations/20260514120000_add_execution_journal/migration.sql`.
+- New DB journal helper: `src/flow/execution-journal-db.ts`.
+- `/flow/dry-run-signal` now inserts an atomic DB processing claim before risk evaluation. Terminal duplicates return the persisted decision without rerunning risk. Active processing duplicates return `already_processing` with the existing journal ID. Stale processing rows use one explicit rule: if the lease is older than `FLOW_EXECUTION_JOURNAL_LEASE_TIMEOUT_MS=120000`, mark the row `processing_error` with reason `stale_in_flight_timeout` and do not rerun risk.
+- Invalid payloads are persisted as `state=invalid_payload`, `reject_reason=invalid_payload`, `error_reason=invalid_payload`.
+- Processor exceptions are persisted as `state=processing_error`, `reject_reason=processing_error`, `error_reason=processing_error`.
+- Accepted/rejected DB rows are exported back to `data/execution-journals/<signal_id>.json`; the DB row is the durable idempotency record.
+- The endpoint still does not call Jupiter, sign, submit, change Flow behavior, Telegram/n8n behavior, or live `/signal` execution.
+
+Stage 4 verification evidence:
+- `npm run build` passed on 2026-05-14.
+- `npm test` passed on 2026-05-14 with `70 passed`, `3 skipped`.
+- `tests/flow-dry-run-intake.test.ts` covers first valid delivery creating a DB journal and JSON export, terminal duplicate no risk rerun, concurrent duplicate no risk rerun, stale processing timeout, rejected exact `reject_reason`, invalid payload persistence, processing-error persistence, and no live executor path.
 
 Integration complete definition of done:
 - [ ] Flow has a config-gated `trader_bot` sink beside Telegram/n8n.
