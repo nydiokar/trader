@@ -58,8 +58,13 @@ const ConfigSchema = z.object({
   DRY_RUN: booleanEnv("false"),
   KILL_SWITCH: booleanEnv("false"),
 
+  // SLO
+  SLO_WINDOW_HOURS: z.coerce.number().positive().default(1),
+
   // Priority fee
   PRIORITY_FEE_LEVEL: z.enum(["Medium", "High", "VeryHigh"]).default("High"),
+  PRIORITY_FEE_HARD_CAP_MICROLAMPORTS: z.coerce.number().int().positive().default(1_000_000),
+  PRIORITY_FEE_FALLBACK_MICROLAMPORTS: z.coerce.number().int().positive().default(50_000),
 
   // Database
   DATABASE_URL: z.string().default("file:./data/bot.db"),

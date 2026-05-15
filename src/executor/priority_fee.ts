@@ -1,5 +1,7 @@
 import { z } from "zod";
 import { config } from "../config.js";
+import { logger } from "../logger.js";
+import { createRateLimiter } from "../utils/rate-limiter.js";
 
 export type PriorityFeeLevel = "Medium" | "High" | "VeryHigh";
 
@@ -31,7 +33,16 @@ type PriorityFeeEstimateInput = {
   priorityLevel?: PriorityFeeLevel;
   serializedTransaction?: string;
   fetchImpl?: FetchLike;
+  hardCapMicroLamports?: number;
+  fallbackMicroLamports?: number;
 };
+
+const defaultLimiter = createRateLimiter({
+  requestsPerSecond: 5,
+  maxRetries: 3,
+  baseBackoffMs: 500,
+  jitterFactor: 0.3,
+});
 
 export async function getPriorityFeeEstimate(
   input: PriorityFeeEstimateInput = {},
@@ -39,10 +50,14 @@ export async function getPriorityFeeEstimate(
   const rpcUrl = input.rpcUrl ?? config.HELIUS_RPC_URL;
   const priorityLevel = input.priorityLevel ?? config.PRIORITY_FEE_LEVEL;
   const fetchImpl = input.fetchImpl ?? fetch;
+  const hardCap = input.hardCapMicroLamports ?? config.PRIORITY_FEE_HARD_CAP_MICROLAMPORTS;
+  const fallback = input.fallbackMicroLamports ?? config.PRIORITY_FEE_FALLBACK_MICROLAMPORTS;
+
+  const wrappedFetch = defaultLimiter.wrapFetch(fetchImpl);
 
   let response: Response;
   try {
-    response = await fetchImpl(rpcUrl, {
+    response = await wrappedFetch(rpcUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -60,42 +75,50 @@ export async function getPriorityFeeEstimate(
       }),
     });
   } catch (error) {
-    throw new PriorityFeeError(
-      "failed to fetch priority fee estimate",
-      "network_error",
-      error,
-    );
+    logger.warn({ err: error }, "priority fee fetch failed, using fallback");
+    return BigInt(fallback);
   }
 
   if (!response.ok) {
-    throw new PriorityFeeError(
-      `priority fee estimate request failed with HTTP ${response.status}`,
-      "http_error",
+    logger.warn(
+      { status: response.status },
+      "priority fee request returned non-OK, using fallback",
     );
+    return BigInt(fallback);
   }
 
-  const body: unknown = await response.json();
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    logger.warn("priority fee response body not parseable, using fallback");
+    return BigInt(fallback);
+  }
+
   if (
     typeof body === "object" &&
     body !== null &&
     "error" in body &&
     body.error
   ) {
-    throw new PriorityFeeError(
-      "priority fee estimate JSON-RPC error",
-      "rpc_error",
-      body.error,
-    );
+    logger.warn({ rpcError: (body as { error: unknown }).error }, "priority fee RPC error, using fallback");
+    return BigInt(fallback);
   }
 
   const parsed = PriorityFeeResponse.safeParse(body);
   if (!parsed.success) {
-    throw new PriorityFeeError(
-      "priority fee estimate response was malformed",
-      "malformed_response",
-      parsed.error,
-    );
+    logger.warn({ zodError: parsed.error }, "priority fee malformed response, using fallback");
+    return BigInt(fallback);
   }
 
-  return BigInt(Math.ceil(parsed.data.result.priorityFeeEstimate));
+  const raw = Math.ceil(parsed.data.result.priorityFeeEstimate);
+  if (raw > hardCap) {
+    logger.warn(
+      { raw, hardCap },
+      "priority fee estimate exceeds hard cap, clamping",
+    );
+    return BigInt(hardCap);
+  }
+
+  return BigInt(raw);
 }

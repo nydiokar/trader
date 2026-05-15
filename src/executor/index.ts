@@ -30,6 +30,7 @@ import {
   tradesSubmitted,
 } from "../metrics/registry.js";
 import { getSolanaRpc, getTradingSigner } from "../solana/runtime.js";
+import { assertExecutorPathNotReachableFromFlowDryRun } from "../flow/execution-boundary.js";
 import {
   base64WireTransactionToBase58,
   createJitoClient,
@@ -39,6 +40,13 @@ import {
 } from "./jito.js";
 import { getQuote, getSwapInstructions } from "./jupiter.js";
 import { getPriorityFeeEstimate } from "./priority_fee.js";
+import {
+  notify,
+  formatTradeConfirmed,
+  formatTradeFailed,
+  formatUncertainTransaction,
+} from "../notify/telegram.js";
+import { evaluateSloAlerts, formatSloAlert } from "../metrics/slo.js";
 
 const FIXED_COMPUTE_UNIT_LIMIT = 1_400_000;
 const CONFIRM_TIMEOUT_MS = 45_000;
@@ -61,7 +69,7 @@ type QuoteClient = {
 };
 
 type PriorityFeeClient = {
-  getPriorityFeeEstimate(): Promise<bigint>;
+  getPriorityFeeEstimate(serializedTransaction?: string): Promise<bigint>;
 };
 
 type ChainClient = {
@@ -87,6 +95,16 @@ type ChainClient = {
   ): Promise<ConfirmedTransactionDetails | null>;
 };
 
+type NotifyFn = (message: string) => Promise<void>;
+
+type SloQueryResult = {
+  submitted: number;
+  confirmed: number;
+  submitToConfirmValues: number[];
+};
+
+type SloQueryFn = (windowStartSeconds: number) => Promise<SloQueryResult>;
+
 type ExecutorDependencies = {
   connection: ChainClient;
   wallet: Awaited<ReturnType<typeof getTradingSigner>>;
@@ -95,6 +113,9 @@ type ExecutorDependencies = {
   jitoClient?: JitoClient;
   jitoTipLamports?: bigint;
   dryRun?: boolean;
+  notify?: NotifyFn;
+  querySloWindow?: SloQueryFn;
+  sloWindowHours?: number;
   now(): number;
   sleep(ms: number): Promise<void>;
 };
@@ -105,13 +126,23 @@ type PersistedTrade = {
   submittedVia: "jito" | "rpc";
   errorMsg?: string;
   amountOutActual?: number;
+  slippageActual?: number;
+  submitToConfirmSeconds?: number;
   dryRun?: boolean;
 };
 
 type ConfirmedTransactionDetails = {
+  transaction?: {
+    message?: {
+      accountKeys?: Array<{ pubkey?: string } | string>;
+    };
+  };
   meta?: {
     preTokenBalances?: TokenBalance[];
     postTokenBalances?: TokenBalance[];
+    preBalances?: number[];
+    postBalances?: number[];
+    fee?: number;
   } | null;
 };
 
@@ -130,6 +161,7 @@ type ReconciliationResult =
       ok: true;
       amountOutActual: number;
       amountOutRaw: bigint;
+      slippageActual?: number;
       warning?: string;
     }
   | {
@@ -145,11 +177,15 @@ function defaultDependencies(): Promise<ExecutorDependencies> {
       getSwapInstructions,
     },
     priorityFeeClient: {
-      getPriorityFeeEstimate,
+      getPriorityFeeEstimate: (serializedTransaction?: string) =>
+        getPriorityFeeEstimate({ serializedTransaction }),
     },
     jitoClient: createJitoClient(),
     jitoTipLamports: BigInt(config.JITO_TIP_LAMPORTS),
     dryRun: config.DRY_RUN,
+    notify,
+    querySloWindow: defaultSloQuery,
+    sloWindowHours: config.SLO_WINDOW_HOURS,
     now: () => Date.now(),
     sleep: (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
   }).then(async (deps) => ({
@@ -192,6 +228,7 @@ export async function executeSignalWithDependencies(
   decision: string;
   response: unknown;
 }> {
+  assertExecutorPathNotReachableFromFlowDryRun("executor_trading");
   executorPathReachability.inc({ path: "executor_trading" });
   const stopTimer = signalToConfirmSeconds.startTimer();
   const createdAt = Math.floor(deps.now() / 1000);
@@ -215,7 +252,7 @@ export async function executeSignalWithDependencies(
       deps.connection,
       deps.wallet,
       swapInstructions,
-      await deps.priorityFeeClient.getPriorityFeeEstimate(),
+      deps.priorityFeeClient,
     );
 
     signature = getSignatureFromTransaction(builtTransaction.transaction);
@@ -280,6 +317,11 @@ export async function executeSignalWithDependencies(
       stopSubmitTimer();
     }
 
+    // Snapshot confirm time now — before reconciliation, SLO check, or Telegram — so latency
+    // values reflect signal-to-confirm and are not inflated by post-confirm work.
+    const confirmTimeMs = deps.now();
+    const signalToConfirmSec = (confirmTimeMs - createdAt * 1000) / 1000;
+
     const reconciliation =
       outcome === "confirmed"
         ? await reconcileConfirmedTrade(deps.connection, signature, deps.wallet.address, input, quote)
@@ -288,15 +330,21 @@ export async function executeSignalWithDependencies(
     await writeTrade(
       input,
       createdAt,
-      deps.now(),
-      toPersistedTrade(outcome, signature, submittedVia, reconciliation),
+      confirmTimeMs,
+      toPersistedTrade(outcome, signature, submittedVia, signalToConfirmSec, reconciliation),
     );
 
     tradesConfirmed.inc({ result: outcome });
     stopTimer();
 
+    await runSloCheck(deps);
+
     if (outcome === "confirmed") {
       if (reconciliation?.ok === false) {
+        await safeNotify(
+          deps.notify,
+          formatTradeFailed({ signature: signature.toString(), error: reconciliation.errorMsg }),
+        );
         return {
           state: "failed",
           decision: "reconciliation_failed",
@@ -311,6 +359,18 @@ export async function executeSignalWithDependencies(
       };
     }
 
+      const latencySeconds = Math.round(signalToConfirmSec);
+      await safeNotify(
+        deps.notify,
+        formatTradeConfirmed({
+          amountSol: input.amountSol,
+          actualOut: reconciliation?.ok ? reconciliation.amountOutActual : 0,
+          symbol: input.tokenMint.slice(0, 6),
+          mint: input.tokenMint,
+          signature: signature.toString(),
+          latencySeconds,
+        }),
+      );
       return {
         state: "done",
         decision: "accepted",
@@ -322,6 +382,15 @@ export async function executeSignalWithDependencies(
           amount_out_actual: reconciliation?.ok ? reconciliation.amountOutActual : undefined,
         },
       };
+    }
+
+    if (outcome === "uncertain") {
+      await safeNotify(deps.notify, formatUncertainTransaction(signature.toString()));
+    } else {
+      await safeNotify(
+        deps.notify,
+        formatTradeFailed({ signature: signature.toString(), error: outcome }),
+      );
     }
 
     return {
@@ -352,6 +421,11 @@ export async function executeSignalWithDependencies(
       errorMsg: error instanceof Error ? error.message : "unknown executor error",
     });
 
+    if (outcome === "uncertain" && signature) {
+      await safeNotify(deps.notify, formatUncertainTransaction(signature.toString()));
+    }
+    // pre_submit_failed: no Telegram — not submitted, not operator-actionable.
+
     return {
       state: "failed",
       decision: outcome,
@@ -361,6 +435,65 @@ export async function executeSignalWithDependencies(
         ...(submissionAttempted && signature ? { signature: signature.toString() } : {}),
       },
     };
+  }
+}
+
+async function defaultSloQuery(windowStartSeconds: number): Promise<SloQueryResult> {
+  const trades = await db.trade.findMany({
+    where: {
+      createdAt: { gte: windowStartSeconds },
+      dryRun: false,
+      state: { not: "pre_submit_failed" },
+    },
+    select: { state: true, submitToConfirmSeconds: true },
+  });
+
+  const submitted = trades.length;
+  const confirmed = trades.filter((t) => t.state === "confirmed").length;
+  const submitToConfirmValues = trades
+    .map((t) => t.submitToConfirmSeconds)
+    .filter((v): v is number => v !== null && v !== undefined);
+
+  return { submitted, confirmed, submitToConfirmValues };
+}
+
+async function runSloCheck(
+  deps: Pick<ExecutorDependencies, "notify" | "querySloWindow" | "sloWindowHours" | "now">,
+): Promise<void> {
+  if (!deps.querySloWindow) return;
+
+  const windowHours = deps.sloWindowHours ?? 1;
+  const windowStartSeconds = Math.floor(deps.now() / 1000) - windowHours * 3600;
+
+  let result: SloQueryResult;
+  try {
+    result = await deps.querySloWindow(windowStartSeconds);
+  } catch (err) {
+    logger.warn({ err }, "slo window query failed (non-fatal)");
+    return;
+  }
+
+  const sorted = [...result.submitToConfirmValues].sort((a, b) => a - b);
+  const p95Index = Math.ceil(sorted.length * 0.95) - 1;
+  const p95 = sorted.length > 0 ? (sorted[Math.max(0, p95Index)] ?? 0) : 0;
+
+  const alerts = evaluateSloAlerts({
+    submitted: result.submitted,
+    confirmed: result.confirmed,
+    p95SignalToConfirmSeconds: p95,
+  });
+
+  for (const alert of alerts) {
+    await safeNotify(deps.notify, formatSloAlert(alert));
+  }
+}
+
+async function safeNotify(notifyFn: NotifyFn | undefined, message: string): Promise<void> {
+  if (!notifyFn) return;
+  try {
+    await notifyFn(message);
+  } catch (err) {
+    logger.error({ err }, "telegram notification failed (non-fatal)");
   }
 }
 
@@ -437,7 +570,7 @@ async function buildSwapTransaction(
   connection: ChainClient,
   wallet: Awaited<ReturnType<typeof getTradingSigner>>,
   swapInstructions: SwapInstructionsResponse,
-  priorityFeeMicroLamports: bigint,
+  priorityFeeClient: PriorityFeeClient,
 ): Promise<{
   transaction: Awaited<ReturnType<typeof signTransactionMessageWithSigners>>;
   lastValidBlockHeight: number;
@@ -450,20 +583,26 @@ async function buildSwapTransaction(
     ),
   );
 
-  const firstPassTransaction = await signSwapTransaction(
+  // First pass: build with a placeholder fee to get a serialized tx for the fee estimate.
+  // Use signTransactionMessageWithSigners directly (not the instrumented wrapper) so the
+  // signing metric and flow-dry-run boundary check fire only once, on the real submission tx.
+  const firstPassTransaction = await signTransactionMessageWithSigners(
     createSwapTransactionMessage({
       wallet,
       swapInstructions,
       latestBlockhash,
       addressesByLookupTableAddress,
       computeUnitLimit: FIXED_COMPUTE_UNIT_LIMIT,
-      priorityFeeMicroLamports,
+      priorityFeeMicroLamports: 0n,
     }),
   );
 
-  const simulation = await connection.simulateTransaction(
-    getBase64EncodedWireTransaction(firstPassTransaction),
-  );
+  const firstPassBase64 = getBase64EncodedWireTransaction(firstPassTransaction);
+
+  // Fetch the real priority fee with transaction context for accurate account-aware estimate.
+  const priorityFeeMicroLamports = await priorityFeeClient.getPriorityFeeEstimate(firstPassBase64);
+
+  const simulation = await connection.simulateTransaction(firstPassBase64);
   if (simulation.err) {
     throw new Error(`swap simulation failed: ${JSON.stringify(simulation.err)}`);
   }
@@ -505,6 +644,7 @@ async function submitBuiltTransaction(input: {
         tipLamports: input.deps.jitoTipLamports ?? BigInt(config.JITO_TIP_LAMPORTS),
         latestBlockhash: input.builtTransaction.latestBlockhash,
       });
+      assertExecutorPathNotReachableFromFlowDryRun("transaction_submission");
       executorPathReachability.inc({ path: "transaction_submission" });
       const bundleId = await input.deps.jitoClient.submitBundle([
         base64WireTransactionToBase58(tipTransaction.base64WireTransaction),
@@ -530,6 +670,7 @@ async function submitBuiltTransaction(input: {
   }
 
   input.submissionState.markAttempted();
+  assertExecutorPathNotReachableFromFlowDryRun("transaction_submission");
   executorPathReachability.inc({ path: "transaction_submission" });
   await input.deps.connection.sendTransaction(input.signedWireTransaction, {
     skipPreflight: true,
@@ -542,6 +683,7 @@ async function submitBuiltTransaction(input: {
 async function signSwapTransaction(
   transactionMessage: Parameters<typeof signTransactionMessageWithSigners>[0],
 ): Promise<Awaited<ReturnType<typeof signTransactionMessageWithSigners>>> {
+  assertExecutorPathNotReachableFromFlowDryRun("signing");
   executorPathReachability.inc({ path: "signing" });
   return signTransactionMessageWithSigners(transactionMessage);
 }
@@ -674,6 +816,7 @@ function toPersistedTrade(
   outcome: ExecutionOutcome,
   signature: Signature,
   submittedVia: "jito" | "rpc",
+  submitToConfirmSeconds: number | undefined,
   reconciliation?: ReconciliationResult,
 ): PersistedTrade {
   return {
@@ -681,6 +824,8 @@ function toPersistedTrade(
     state: outcome,
     submittedVia,
     amountOutActual: reconciliation?.ok ? reconciliation.amountOutActual : undefined,
+    slippageActual: reconciliation?.ok ? reconciliation.slippageActual : undefined,
+    submitToConfirmSeconds,
     dryRun: false,
     errorMsg:
       outcome === "confirmed"
@@ -776,7 +921,44 @@ async function reconcileConfirmedTrade(
     );
   }
 
-  return { ok: true, amountOutActual, amountOutRaw, warning };
+  const slippageActual = reconcileSolSpent(transaction, wallet, input.signalId, signature.toString());
+
+  return { ok: true, amountOutActual, amountOutRaw, slippageActual, warning };
+}
+
+function reconcileSolSpent(
+  transaction: ConfirmedTransactionDetails,
+  walletAddress: string,
+  signalId: string,
+  signatureStr: string,
+): number | undefined {
+  const accountKeys = transaction.transaction?.message?.accountKeys;
+  if (!accountKeys || accountKeys.length === 0) {
+    logger.warn({ signal_id: signalId, signature: signatureStr }, "sol reconciliation: accountKeys missing");
+    return undefined;
+  }
+
+  const walletIndex = accountKeys.findIndex((key) => {
+    const pubkey = typeof key === "string" ? key : key.pubkey;
+    return pubkey === walletAddress;
+  });
+
+  if (walletIndex === -1) {
+    logger.warn({ signal_id: signalId, signature: signatureStr }, "sol reconciliation: wallet not found in accountKeys");
+    return undefined;
+  }
+
+  const pre = transaction.meta?.preBalances?.[walletIndex];
+  const post = transaction.meta?.postBalances?.[walletIndex];
+  const fee = transaction.meta?.fee;
+
+  if (pre === undefined || post === undefined) {
+    logger.warn({ signal_id: signalId, signature: signatureStr, walletIndex }, "sol reconciliation: pre/post balances missing");
+    return undefined;
+  }
+
+  const deltaLamports = pre - post - (fee ?? 0);
+  return deltaLamports / 1_000_000_000;
 }
 
 function findWalletTokenBalance(
@@ -827,6 +1009,8 @@ async function writeTrade(
       tokenMint: input.tokenMint,
       amountSolIn: input.amountSol,
       amountOutActual: trade.amountOutActual,
+      slippageActual: trade.slippageActual,
+      submitToConfirmSeconds: trade.submitToConfirmSeconds,
       signature: trade.signature,
       state: trade.state,
       submittedVia: trade.submittedVia,
@@ -839,6 +1023,8 @@ async function writeTrade(
       tokenMint: input.tokenMint,
       amountSolIn: input.amountSol,
       amountOutActual: trade.amountOutActual,
+      slippageActual: trade.slippageActual,
+      submitToConfirmSeconds: trade.submitToConfirmSeconds,
       signature: trade.signature,
       state: trade.state,
       submittedVia: trade.submittedVia,

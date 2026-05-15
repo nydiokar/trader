@@ -42,8 +42,9 @@ model Trade {
   state           String  // confirmed | failed_onchain | expired | uncertain | pre_submit_failed
   submittedVia    String? @map("submitted_via") // jito | rpc
   dryRun          Boolean @default(false) @map("dry_run")
-  slippageActual  Float?  @map("slippage_actual")
-  createdAt       Int     @map("created_at")
+  slippageActual         Float?  @map("slippage_actual")
+  submitToConfirmSeconds Float?  @map("submit_to_confirm_seconds")
+  createdAt              Int     @map("created_at")
   confirmedAt     Int?    @map("confirmed_at")
   errorMsg        String? @map("error_msg")
 
