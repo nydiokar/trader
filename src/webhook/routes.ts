@@ -19,6 +19,7 @@ import {
 import {
   claimFlowExecutionJournalInDb,
   completeFlowExecutionJournalInDb,
+  executionJournalFromDbRow,
   exportExecutionJournalFromDbRow,
   listSeenFlowTokenMintsFromDb,
   markFlowExecutionJournalProcessingError,
@@ -387,13 +388,14 @@ export async function registerRoutes(
         journal,
         now,
       });
-      const exportedJournal = await exportExecutionJournalFromDbRow(completed);
-      if (!exportedJournal) {
+      const completedJournal = executionJournalFromDbRow(completed);
+      if (!completedJournal) {
         throw new Error(`completed execution journal is not exportable: ${completed.journal_id}`);
       }
+      await tryExportFlowDryRunJournalArtifact(completed);
       const status =
-        exportedJournal.risk_decision === "accepted" ? "dry_run_accepted" : "dry_run_rejected";
-      return reply.code(200).send(buildFlowDryRunResponse(status, exportedJournal));
+        completedJournal.risk_decision === "accepted" ? "dry_run_accepted" : "dry_run_rejected";
+      return reply.code(200).send(buildFlowDryRunResponse(status, completedJournal));
     } catch (error) {
       logger.error({ err: error, signal_id: signalId }, "flow dry-run intake failed");
       if (claim?.kind === "claimed") {
@@ -447,8 +449,9 @@ async function buildFlowDryRunResponseFromDbRow(
   duplicateStatus: "already_processed" | "processing_error",
   row: ExecutionJournalRow,
 ) {
-  const journal = await exportExecutionJournalFromDbRow(row);
+  const journal = executionJournalFromDbRow(row);
   if (journal) {
+    await tryExportFlowDryRunJournalArtifact(row);
     return buildFlowDryRunResponse(
       duplicateStatus === "already_processed" ? duplicateStatus : "already_processed",
       journal,
@@ -469,6 +472,22 @@ async function buildFlowDryRunResponseFromDbRow(
     live_execution_enabled: false,
     dry_run_order: null,
   };
+}
+
+async function tryExportFlowDryRunJournalArtifact(row: ExecutionJournalRow): Promise<void> {
+  try {
+    await exportExecutionJournalFromDbRow(row);
+  } catch (error) {
+    logger.error(
+      {
+        err: error,
+        journal_id: row.journal_id,
+        signal_id: row.flow_signal_id,
+        state: row.state,
+      },
+      "flow dry-run journal JSON export failed after DB decision",
+    );
+  }
 }
 
 function extractInvalidPayloadIdempotencyKey(

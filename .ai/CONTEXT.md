@@ -153,13 +153,15 @@ Stage 4 implementation notes:
 - Invalid payloads are persisted as `state=invalid_payload`, `reject_reason=invalid_payload`, `error_reason=invalid_payload`.
 - Processor exceptions are persisted as `state=processing_error`, `reject_reason=processing_error`, `error_reason=processing_error`.
 - Accepted/rejected DB rows are exported back to `data/execution-journals/<signal_id>.json`; the DB row is the durable idempotency record.
+- JSON export failures after DB completion are treated as artifact failures: the DB terminal decision remains canonical and the endpoint still returns the persisted accepted/rejected decision.
 - The endpoint still does not call Jupiter, sign, submit, change Flow behavior, Telegram/n8n behavior, or live `/signal` execution.
 
 Stage 4 verification evidence:
 - `npm run build` passed on 2026-05-15.
-- `npm test` passed on 2026-05-15 with `72 passed`, `3 skipped`.
+- `npm test` passed on 2026-05-15 with `73 passed`, `3 skipped`.
 - `tests/flow-dry-run-intake.test.ts` covers first valid delivery creating a DB journal and JSON export, terminal duplicate no risk rerun, concurrent duplicate no risk rerun, stale processing timeout, rejected exact `reject_reason`, invalid payload persistence, processing-error persistence, and no live executor path.
 - Additional hardening coverage proves duplicate `prepared_snapshot_id` deliveries do not rerun risk and stale JSON artifacts do not affect HTTP dry-run risk.
+- Additional artifact-failure coverage proves a JSON export write failure after DB completion does not downgrade the DB terminal decision to `processing_error`.
 
 Flow-to-Trader roadmap - broader milestones:
 - **Stage 5 - Production dry-run stream and live-readiness gate:** turn the completed bridge on in production dry-run mode, collect real Flow delivery evidence, add visibility, and define the exact live promotion gate before any capital is risked.

@@ -419,6 +419,44 @@ describe("Flow dry-run HTTP intake", () => {
     }
   });
 
+  it("keeps the DB terminal decision when JSON export fails after completion", async () => {
+    const ctx = await makeApp();
+    try {
+      const signal = makeSignal({ signal_id: "flow-http-export-failure" });
+      fs.mkdirSync(path.join(ctx.journalDir, `${signal.signal_id}.json`), { recursive: true });
+
+      const response = await postFlowSignal(ctx.app, signal);
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual(
+        expect.objectContaining({
+          status: "dry_run_accepted",
+          signal_id: signal.signal_id,
+          risk_decision: "accepted",
+          reject_reason: null,
+          live_execution_enabled: false,
+        }),
+      );
+
+      const sqlite = new Database(ctx.dbPath, { readonly: true });
+      const row = sqlite
+        .prepare("SELECT state, risk_decision, reject_reason FROM execution_journal WHERE flow_signal_id = ?")
+        .get(signal.signal_id) as {
+        state: string;
+        risk_decision: string;
+        reject_reason: string | null;
+      };
+      sqlite.close();
+      expect(row).toEqual({
+        state: "accepted",
+        risk_decision: "accepted",
+        reject_reason: null,
+      });
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
   it("does not process concurrent duplicate deliveries twice", async () => {
     let releaseProcessor!: () => void;
     const processorHold = new Promise<void>((resolve) => {

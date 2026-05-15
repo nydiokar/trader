@@ -292,6 +292,15 @@ export async function listSeenFlowTokenMintsFromDb(excludeSignalId?: string): Pr
 export async function exportExecutionJournalFromDbRow(
   row: ExecutionJournalRow,
 ): Promise<ExecutionJournal | null> {
+  const journal = executionJournalFromDbRow(row);
+  if (!journal) return null;
+
+  await mkdir(path.dirname(journal.journal_path), { recursive: true });
+  await writeFile(journal.journal_path, `${JSON.stringify(journal, null, 2)}\n`, "utf8");
+  return journal;
+}
+
+export function executionJournalFromDbRow(row: ExecutionJournalRow): ExecutionJournal | null {
   if (row.state !== "accepted" && row.state !== "rejected") {
     return null;
   }
@@ -306,7 +315,7 @@ export async function exportExecutionJournalFromDbRow(
     throw new Error(`execution journal ${row.journal_id} is missing terminal journal fields`);
   }
 
-  const journal = ExecutionJournalSchema.parse({
+  return ExecutionJournalSchema.parse({
     journal_id: row.journal_id,
     journal_path: row.journal_path,
     idempotency_key: row.idempotency_key,
@@ -321,10 +330,6 @@ export async function exportExecutionJournalFromDbRow(
     dry_run_order: row.dry_run_order_json ? parseJson(row.dry_run_order_json) : null,
     outcome: row.outcome,
   });
-
-  await mkdir(path.dirname(journal.journal_path), { recursive: true });
-  await writeFile(journal.journal_path, `${JSON.stringify(journal, null, 2)}\n`, "utf8");
-  return journal;
 }
 
 type Queryable = Pick<typeof db, "$queryRaw" | "$executeRaw">;
