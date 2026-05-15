@@ -50,11 +50,35 @@ export type ExecutionJournalRow = {
   completed_at: string | Date | null;
 };
 
+export type FlowDryRunAttemptRow = {
+  id: string;
+  status: FlowDryRunAttemptStatus;
+  flow_signal_id: string | null;
+  prepared_snapshot_id: string | null;
+  idempotency_key: string | null;
+  journal_id: string | null;
+  risk_decision: string | null;
+  reject_reason: string | null;
+  error_reason: string | null;
+  error_message: string | null;
+  http_status_code: number | null;
+  live_execution_enabled: boolean | number;
+  response_json: string | null;
+  created_at: string | Date;
+};
+
 export type FlowJournalClaimResult =
   | { kind: "claimed"; row: ExecutionJournalRow; leaseOwner: string }
   | { kind: "already_processing"; row: ExecutionJournalRow }
   | { kind: "terminal"; row: ExecutionJournalRow }
   | { kind: "stale_marked_processing_error"; row: ExecutionJournalRow };
+
+export type FlowDryRunAttemptStatus =
+  | "accepted"
+  | "rejected"
+  | "duplicate"
+  | "invalid"
+  | "processing_error";
 
 export async function claimFlowExecutionJournalInDb(input: {
   signal: FlowSignalArtifact;
@@ -276,6 +300,100 @@ export async function getFlowExecutionJournalById(
   journalId: string,
 ): Promise<ExecutionJournalRow | null> {
   return selectJournalById(db, journalId);
+}
+
+export async function queryFlowExecutionJournals(input: {
+  journalId?: string;
+  flowSignalId?: string;
+  preparedSnapshotId?: string;
+  idempotencyKey?: string;
+  status?: ExecutionJournalState;
+  limit?: number;
+}): Promise<ExecutionJournalRow[]> {
+  const limit = Math.min(Math.max(input.limit ?? 25, 1), 100);
+  return db.$queryRaw<ExecutionJournalRow[]>`
+    SELECT *
+    FROM execution_journal
+    WHERE (${input.journalId ?? null} IS NULL OR journal_id = ${input.journalId ?? null})
+      AND (${input.flowSignalId ?? null} IS NULL OR flow_signal_id = ${input.flowSignalId ?? null})
+      AND (${input.preparedSnapshotId ?? null} IS NULL OR prepared_snapshot_id = ${input.preparedSnapshotId ?? null})
+      AND (${input.idempotencyKey ?? null} IS NULL OR idempotency_key = ${input.idempotencyKey ?? null})
+      AND (${input.status ?? null} IS NULL OR state = ${input.status ?? null})
+    ORDER BY created_at DESC
+    LIMIT ${limit}
+  `;
+}
+
+export async function persistFlowDryRunAttempt(input: {
+  status: FlowDryRunAttemptStatus;
+  flowSignalId?: string | null;
+  preparedSnapshotId?: string | null;
+  idempotencyKey?: string | null;
+  journalId?: string | null;
+  riskDecision?: string | null;
+  rejectReason?: string | null;
+  errorReason?: string | null;
+  errorMessage?: string | null;
+  httpStatusCode?: number | null;
+  response?: unknown;
+  now?: Date;
+}): Promise<void> {
+  const now = input.now ?? new Date();
+  await db.$executeRaw`
+    INSERT INTO flow_dry_run_attempt (
+      id,
+      status,
+      flow_signal_id,
+      prepared_snapshot_id,
+      idempotency_key,
+      journal_id,
+      risk_decision,
+      reject_reason,
+      error_reason,
+      error_message,
+      http_status_code,
+      live_execution_enabled,
+      response_json,
+      created_at
+    ) VALUES (
+      ${randomUUID()},
+      ${input.status},
+      ${input.flowSignalId ?? null},
+      ${input.preparedSnapshotId ?? null},
+      ${input.idempotencyKey ?? null},
+      ${input.journalId ?? null},
+      ${input.riskDecision ?? null},
+      ${input.rejectReason ?? null},
+      ${input.errorReason ?? null},
+      ${input.errorMessage ?? null},
+      ${input.httpStatusCode ?? null},
+      ${false},
+      ${input.response === undefined ? null : json(input.response)},
+      ${now.toISOString()}
+    )
+  `;
+}
+
+export async function queryFlowDryRunAttempts(input: {
+  flowSignalId?: string;
+  preparedSnapshotId?: string;
+  idempotencyKey?: string;
+  journalId?: string;
+  status?: FlowDryRunAttemptStatus;
+  limit?: number;
+}): Promise<FlowDryRunAttemptRow[]> {
+  const limit = Math.min(Math.max(input.limit ?? 25, 1), 100);
+  return db.$queryRaw<FlowDryRunAttemptRow[]>`
+    SELECT *
+    FROM flow_dry_run_attempt
+    WHERE (${input.flowSignalId ?? null} IS NULL OR flow_signal_id = ${input.flowSignalId ?? null})
+      AND (${input.preparedSnapshotId ?? null} IS NULL OR prepared_snapshot_id = ${input.preparedSnapshotId ?? null})
+      AND (${input.idempotencyKey ?? null} IS NULL OR idempotency_key = ${input.idempotencyKey ?? null})
+      AND (${input.journalId ?? null} IS NULL OR journal_id = ${input.journalId ?? null})
+      AND (${input.status ?? null} IS NULL OR status = ${input.status ?? null})
+    ORDER BY created_at DESC
+    LIMIT ${limit}
+  `;
 }
 
 export async function listSeenFlowTokenMintsFromDb(excludeSignalId?: string): Promise<string[]> {

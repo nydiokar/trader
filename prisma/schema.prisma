@@ -91,6 +91,32 @@ model ExecutionJournal {
   @@map("execution_journal")
 }
 
+// Durable per-delivery intake attempts for Stage 5 production dry-run evidence.
+// ExecutionJournal is the idempotent terminal record; this table keeps every
+// observed HTTP decision, including duplicates and invalid payloads.
+model FlowDryRunAttempt {
+  id                   String   @id @default(uuid())
+  status               String
+  flowSignalId         String?  @map("flow_signal_id")
+  preparedSnapshotId   String?  @map("prepared_snapshot_id")
+  idempotencyKey       String?  @map("idempotency_key")
+  journalId            String?  @map("journal_id")
+  riskDecision         String?  @map("risk_decision")
+  rejectReason         String?  @map("reject_reason")
+  errorReason          String?  @map("error_reason")
+  errorMessage         String?  @map("error_message")
+  httpStatusCode       Int?     @map("http_status_code")
+  liveExecutionEnabled Boolean  @default(false) @map("live_execution_enabled")
+  responseJson         String?  @map("response_json")
+  createdAt            DateTime @default(now()) @map("created_at")
+
+  @@index([status], name: "idx_flow_dry_run_attempt_status")
+  @@index([flowSignalId], name: "idx_flow_dry_run_attempt_signal")
+  @@index([preparedSnapshotId], name: "idx_flow_dry_run_attempt_prepared")
+  @@index([idempotencyKey], name: "idx_flow_dry_run_attempt_idempotency")
+  @@map("flow_dry_run_attempt")
+}
+
 // Spec §4.1 — per-token blocklist
 model Blocklist {
   tokenMint String @id @map("token_mint")

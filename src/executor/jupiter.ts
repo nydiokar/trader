@@ -4,7 +4,7 @@ import {
   type SwapInstructionsResponse,
 } from "@jup-ag/api";
 import { config } from "../config.js";
-import { quoteLatencySeconds } from "../metrics/registry.js";
+import { executorPathReachability, quoteLatencySeconds } from "../metrics/registry.js";
 
 const WSOL_MINT = "So11111111111111111111111111111111111111112";
 
@@ -33,6 +33,7 @@ export async function getQuote(
   amountSol: number,
   maxSlippageBps: number,
 ): Promise<QuoteResponse> {
+  executorPathReachability.inc({ path: "jupiter_quote" });
   const stopTimer = quoteLatencySeconds.startTimer();
 
   try {
@@ -81,6 +82,7 @@ export async function getSwapInstructions(
   quote: QuoteResponse,
   walletPublicKey: string,
 ): Promise<SwapInstructionsResponse> {
+  executorPathReachability.inc({ path: "jupiter_swap_instructions" });
   try {
     return await jupiter.swapInstructionsPost({
       swapRequest: {

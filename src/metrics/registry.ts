@@ -31,6 +31,20 @@ export const rejections = new Counter({
   registers: [register],
 });
 
+export const flowDryRunDecisions = new Counter({
+  name: "flow_dry_run_decisions_total",
+  help: "Flow dry-run intake decisions by outcome",
+  labelNames: ["status"] as const,
+  registers: [register],
+});
+
+export const executorPathReachability = new Counter({
+  name: "executor_path_reachability_total",
+  help: "Executor/Jupiter/signing/submission path entries; must stay zero during Flow dry-run-only trials",
+  labelNames: ["path"] as const,
+  registers: [register],
+});
+
 // Spec §5.2 — required histograms
 export const signalToConfirmSeconds = new Histogram({
   name: "signal_to_confirm_seconds",
@@ -94,6 +108,26 @@ for (const reason of [
   "tripwires_triggered",
 ] as const) {
   rejections.labels(reason).inc(0);
+}
+
+for (const status of [
+  "accepted",
+  "rejected",
+  "duplicate",
+  "invalid",
+  "processing_error",
+] as const) {
+  flowDryRunDecisions.labels(status).inc(0);
+}
+
+for (const path of [
+  "executor_trading",
+  "jupiter_quote",
+  "jupiter_swap_instructions",
+  "signing",
+  "transaction_submission",
+] as const) {
+  executorPathReachability.labels(path).inc(0);
 }
 
 walletSolBalance.set(0);

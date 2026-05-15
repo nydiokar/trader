@@ -3,6 +3,7 @@ import { db } from "../db/index.js";
 import { logger } from "../logger.js";
 import {
   register,
+  flowDryRunDecisions,
   killSwitchGauge,
   rejections,
   signalsReceived,
@@ -24,6 +25,7 @@ import {
   listSeenFlowTokenMintsFromDb,
   markFlowExecutionJournalProcessingError,
   persistInvalidFlowExecutionJournal,
+  persistFlowDryRunAttempt,
   type ExecutionJournalRow,
 } from "../flow/execution-journal-db.js";
 import type { ExecutionJournal, FlowRiskConfig, FlowSignalArtifact } from "../flow/schemas.js";
@@ -296,6 +298,22 @@ export async function registerRoutes(
         message: error instanceof Error ? error.message : String(error),
         now,
       });
+      const response = {
+        error: "invalid flow payload",
+        reason: "invalid_payload",
+        signal_id: null,
+        live_execution_enabled: false,
+      };
+      await persistFlowDryRunAttempt({
+        status: "invalid",
+        idempotencyKey,
+        rejectReason: "invalid_payload",
+        errorReason: "invalid_payload",
+        errorMessage: error instanceof Error ? error.message : String(error),
+        httpStatusCode: 400,
+        response,
+        now,
+      });
       await writeFlowDryRunAttempt(flowJournalDir, {
         status: "invalid_payload",
         signal_id: "unknown",
@@ -305,12 +323,8 @@ export async function registerRoutes(
         live_execution_enabled: false,
         created_at: now.toISOString(),
       });
-      return reply.code(400).send({
-        error: "invalid flow payload",
-        reason: "invalid_payload",
-        signal_id: null,
-        live_execution_enabled: false,
-      });
+      flowDryRunDecisions.inc({ status: "invalid" });
+      return reply.code(400).send(response);
     }
     const signalId = signal.signal_id;
     let claim: Awaited<ReturnType<typeof claimFlowExecutionJournalInDb>> | null = null;
@@ -326,11 +340,26 @@ export async function registerRoutes(
 
       if (claim.kind === "terminal") {
         const response = await buildFlowDryRunResponseFromDbRow("already_processed", claim.row);
+        await persistFlowDryRunAttempt({
+          status: "duplicate",
+          flowSignalId: claim.row.flow_signal_id,
+          preparedSnapshotId: claim.row.prepared_snapshot_id,
+          idempotencyKey: httpPayload.idempotencyKey,
+          journalId: claim.row.journal_id,
+          riskDecision: claim.row.risk_decision,
+          rejectReason: claim.row.reject_reason ?? claim.row.error_reason,
+          errorReason: claim.row.error_reason,
+          errorMessage: claim.row.error_message,
+          httpStatusCode: response.status === "processing_error" ? 500 : 200,
+          response,
+          now,
+        });
         await writeFlowDryRunAttempt(flowJournalDir, {
           ...response,
           idempotency_key: httpPayload.idempotencyKey,
           created_at: now.toISOString(),
         });
+        flowDryRunDecisions.inc({ status: "duplicate" });
         return reply.code(response.status === "processing_error" ? 500 : 200).send(response);
       }
 
@@ -344,20 +373,46 @@ export async function registerRoutes(
           idempotency_key: httpPayload.idempotencyKey,
           live_execution_enabled: false,
         };
+        await persistFlowDryRunAttempt({
+          status: "duplicate",
+          flowSignalId: signal.signal_id,
+          preparedSnapshotId: signal.flow.prepared_snapshot_id,
+          idempotencyKey: httpPayload.idempotencyKey,
+          journalId: claim.row.journal_id,
+          httpStatusCode: 202,
+          response,
+          now,
+        });
         await writeFlowDryRunAttempt(flowJournalDir, {
           ...response,
           created_at: now.toISOString(),
         });
+        flowDryRunDecisions.inc({ status: "duplicate" });
         return reply.code(202).send(response);
       }
 
       if (claim.kind === "stale_marked_processing_error") {
         const response = await buildFlowDryRunResponseFromDbRow("processing_error", claim.row);
+        await persistFlowDryRunAttempt({
+          status: "processing_error",
+          flowSignalId: claim.row.flow_signal_id,
+          preparedSnapshotId: claim.row.prepared_snapshot_id,
+          idempotencyKey: httpPayload.idempotencyKey,
+          journalId: claim.row.journal_id,
+          riskDecision: claim.row.risk_decision,
+          rejectReason: claim.row.reject_reason ?? claim.row.error_reason,
+          errorReason: claim.row.error_reason,
+          errorMessage: claim.row.error_message,
+          httpStatusCode: 500,
+          response,
+          now,
+        });
         await writeFlowDryRunAttempt(flowJournalDir, {
           ...response,
           idempotency_key: httpPayload.idempotencyKey,
           created_at: now.toISOString(),
         });
+        flowDryRunDecisions.inc({ status: "processing_error" });
         return reply.code(500).send(response);
       }
 
@@ -395,7 +450,23 @@ export async function registerRoutes(
       await tryExportFlowDryRunJournalArtifact(completed);
       const status =
         completedJournal.risk_decision === "accepted" ? "dry_run_accepted" : "dry_run_rejected";
-      return reply.code(200).send(buildFlowDryRunResponse(status, completedJournal));
+      const response = buildFlowDryRunResponse(status, completedJournal);
+      await persistFlowDryRunAttempt({
+        status: completedJournal.risk_decision === "accepted" ? "accepted" : "rejected",
+        flowSignalId: completed.flow_signal_id,
+        preparedSnapshotId: completed.prepared_snapshot_id,
+        idempotencyKey: completed.idempotency_key,
+        journalId: completed.journal_id,
+        riskDecision: completed.risk_decision,
+        rejectReason: completed.reject_reason,
+        httpStatusCode: 200,
+        response,
+        now,
+      });
+      flowDryRunDecisions.inc({
+        status: completedJournal.risk_decision === "accepted" ? "accepted" : "rejected",
+      });
+      return reply.code(200).send(response);
     } catch (error) {
       logger.error({ err: error, signal_id: signalId }, "flow dry-run intake failed");
       if (claim?.kind === "claimed") {
@@ -407,6 +478,25 @@ export async function registerRoutes(
           now,
         });
       }
+      const response = {
+        error: "flow dry-run processing failed",
+        reason: "processing_error",
+        signal_id: signalId,
+        live_execution_enabled: false,
+      };
+      await persistFlowDryRunAttempt({
+        status: "processing_error",
+        flowSignalId: signalId,
+        preparedSnapshotId: signal.flow.prepared_snapshot_id,
+        idempotencyKey: httpPayload.idempotencyKey,
+        journalId: claim?.kind === "claimed" ? claim.row.journal_id : null,
+        rejectReason: "processing_error",
+        errorReason: "processing_error",
+        errorMessage: error instanceof Error ? error.message : String(error),
+        httpStatusCode: 500,
+        response,
+        now,
+      });
       await writeFlowDryRunAttempt(flowJournalDir, {
         status: "processing_error",
         signal_id: signalId,
@@ -417,12 +507,8 @@ export async function registerRoutes(
         live_execution_enabled: false,
         created_at: now.toISOString(),
       });
-      return reply.code(500).send({
-        error: "flow dry-run processing failed",
-        reason: "processing_error",
-        signal_id: signalId,
-        live_execution_enabled: false,
-      });
+      flowDryRunDecisions.inc({ status: "processing_error" });
+      return reply.code(500).send(response);
     }
   });
 }

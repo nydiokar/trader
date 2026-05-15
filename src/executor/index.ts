@@ -24,6 +24,7 @@ import { db } from "../db/index.js";
 import { logger } from "../logger.js";
 import {
   signalToConfirmSeconds,
+  executorPathReachability,
   submitToConfirmSeconds,
   tradesConfirmed,
   tradesSubmitted,
@@ -191,6 +192,7 @@ export async function executeSignalWithDependencies(
   decision: string;
   response: unknown;
 }> {
+  executorPathReachability.inc({ path: "executor_trading" });
   const stopTimer = signalToConfirmSeconds.startTimer();
   const createdAt = Math.floor(deps.now() / 1000);
 
@@ -448,7 +450,7 @@ async function buildSwapTransaction(
     ),
   );
 
-  const firstPassTransaction = await signTransactionMessageWithSigners(
+  const firstPassTransaction = await signSwapTransaction(
     createSwapTransactionMessage({
       wallet,
       swapInstructions,
@@ -480,7 +482,7 @@ async function buildSwapTransaction(
   });
 
   return {
-    transaction: await signTransactionMessageWithSigners(transactionMessage),
+    transaction: await signSwapTransaction(transactionMessage),
     lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
     latestBlockhash: {
       blockhash: latestBlockhash.blockhash,
@@ -503,6 +505,7 @@ async function submitBuiltTransaction(input: {
         tipLamports: input.deps.jitoTipLamports ?? BigInt(config.JITO_TIP_LAMPORTS),
         latestBlockhash: input.builtTransaction.latestBlockhash,
       });
+      executorPathReachability.inc({ path: "transaction_submission" });
       const bundleId = await input.deps.jitoClient.submitBundle([
         base64WireTransactionToBase58(tipTransaction.base64WireTransaction),
         base64WireTransactionToBase58(input.signedWireTransaction),
@@ -527,12 +530,20 @@ async function submitBuiltTransaction(input: {
   }
 
   input.submissionState.markAttempted();
+  executorPathReachability.inc({ path: "transaction_submission" });
   await input.deps.connection.sendTransaction(input.signedWireTransaction, {
     skipPreflight: true,
     maxRetries: 0,
   });
   tradesSubmitted.inc({ path: "rpc" });
   return "rpc";
+}
+
+async function signSwapTransaction(
+  transactionMessage: Parameters<typeof signTransactionMessageWithSigners>[0],
+): Promise<Awaited<ReturnType<typeof signTransactionMessageWithSigners>>> {
+  executorPathReachability.inc({ path: "signing" });
+  return signTransactionMessageWithSigners(transactionMessage);
 }
 
 function createSwapTransactionMessage(input: {

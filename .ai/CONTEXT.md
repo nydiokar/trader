@@ -1,6 +1,6 @@
 # Trader Bot - Project Context
 
-**Branch:** `main` | **Last Updated:** 2026-05-15 | **Status:** M0-M3 complete. M4-M5 core executor implemented with deterministic coverage; M6-M7 partially implemented; Flow-to-bot dry-run bridge Stages 1-4 complete through DB-backed dry-run execution journal; production dry-run stream and live/staging acceptance remain blocked.
+**Branch:** `main` | **Last Updated:** 2026-05-15 | **Status:** M0-M3 complete. M4-M5 core executor implemented with deterministic coverage; M6-M7 partially implemented; Flow-to-bot dry-run bridge Stages 1-5 complete for production dry-run observability; live trading promotion remains blocked.
 
 ---
 
@@ -170,26 +170,26 @@ Flow-to-Trader roadmap - broader milestones:
 - **Stage 8 - Position lifecycle and sell/exit engine:** own exits in the trader bot, including stop loss, take profit, time-based/manual exits, position reconciliation, and sell execution safety.
 - **Stage 9 - End-to-end production canary and size-up:** operate the full buy-hold-sell loop at tiny size, record evidence over multiple days, resolve incidents, then raise caps only when SLOs and operator controls are proven.
 
-Next immediate tasks - Stage 5:
-- [ ] Configure Flow production/staging `trader_bot` delivery to call trader `/flow/dry-run-signal` with `FLOW_DRY_RUN_WEBHOOK_SECRET`; keep live execution disabled.
-- [ ] Add or verify startup/deploy migration procedure so `execution_journal` migrations are applied before trader accepts Flow traffic.
-- [ ] Run a controlled dry-run stream from real Flow outbox deliveries into trader and record journal counts by accepted/rejected/duplicate/invalid/processing_error.
-- [ ] Add Prometheus metrics for Flow dry-run outcomes: received, accepted, rejected, duplicate, already_processing, invalid_payload, processing_error, stale_timeout, and live_disabled.
-- [ ] Add an operator report or Telegram alert path for accepted dry-runs, rejected dry-runs, invalid payloads, and processing errors.
-- [ ] Add replay tooling for recent Flow signals from the Flow outbox through trader risk without trading.
-- [ ] Add DB inspection/report tooling for `execution_journal` by token, run ID, prepared snapshot ID, source lane, decision, and reject reason.
-- [ ] Produce a Stage 5 evidence artifact with exact dates, config flags, sample journal IDs, outcome counts, and confirmation that no Jupiter/signing/submission path was called.
-- [ ] Do not implement live buy promotion or sell logic in Stage 5; those belong to later milestones.
+Stage 5 complete - production dry-run observability:
+- [x] Configured local Flow `trader_bot` delivery to call trader `/flow/dry-run-signal` with matching Flow/trader HMAC secrets; live execution remains disabled in the route and persisted records.
+- [x] Added Prisma-managed `flow_dry_run_attempt` table and `pnpm db:ready`; `pnpm start` applies migrations before serving and startup validates `execution_journal` plus `flow_dry_run_attempt`.
+- [x] Ran controlled dry-run stream through the real Flow `signal_delivery_outbox` sender into a running trader bot and recorded rejected plus duplicate outcomes.
+- [x] Added Prometheus counters for Flow dry-run decisions and executor/Jupiter/signing/submission path reachability.
+- [x] Added operator query/report/replay tooling in `src/flow/stage5-ops.ts`.
+- [x] Added Flow smoke command `pnpm test:trader-bot-delivery-smoke` to exercise configured trader delivery from the Flow repo.
+- [x] Produced `flow_trader_stage5_production_dryrun_evidence.md` with exact run window, journal IDs, DB attempt IDs, replay/query output, and zero executor path counters.
+- [ ] **[MUST]** Add read-only RPC/Jupiter/Helius rate limiter with 429 backoff and jitter — prevents provider throttling from cascading into journal failures under real traffic. Do not apply to signed submission retries. (ref: `.ai/context/to-borrow-or-not.md`)
+- [x] Do not implement live buy promotion or sell logic in Stage 5; those belong to later milestones.
 
 Integration complete definition of done:
-- [ ] Flow has a config-gated `trader_bot` sink beside Telegram/n8n.
-- [ ] Trader has authenticated dry-run HTTP intake for Flow payloads.
-- [ ] Trader DB has execution journal idempotency by Flow signal/prepared snapshot ID.
-- [ ] Duplicate Flow deliveries return prior journal result without reprocessing.
-- [ ] Accepted dry-runs cannot submit transactions.
-- [ ] Rejected dry-runs persist exact reasons.
-- [ ] Metrics and alerts cover accepted/rejected/duplicate/error/live-disabled outcomes.
-- [ ] Replay tooling can run recent Flow signals through bot risk.
+- [x] Flow has a config-gated `trader_bot` sink beside Telegram/n8n.
+- [x] Trader has authenticated dry-run HTTP intake for Flow payloads.
+- [x] Trader DB has execution journal idempotency by Flow signal/prepared snapshot ID.
+- [x] Duplicate Flow deliveries return prior journal result without reprocessing.
+- [x] Accepted dry-runs cannot submit transactions.
+- [x] Rejected dry-runs persist exact reasons.
+- [x] Metrics cover accepted/rejected/duplicate/error/live-disabled outcomes; Telegram alerts remain future M7 wiring.
+- [x] Replay tooling can run recent Flow signals through bot risk.
 - [ ] Live promotion requires bot-owned config plus all safety gates.
 - [ ] Live promoted trades reuse current executor and reconcile journal/trade state against chain data.
 - [ ] Canary evidence is recorded before raising size.
@@ -198,7 +198,7 @@ Hard constraints:
 - Do not parse Telegram messages as bot input.
 - Do not change Flow gates, triggers, scoring, exit rules, synthesis, analysis, or Telegram behavior.
 - Do not call Jupiter, sign transactions, or submit transactions in the Flow dry-run bridge.
-- Persist every bridge attempt, including rejects.
+- Persist every bridge attempt, including rejects and duplicates, in DB.
 - Keep execution/capital risk checks in the bot, separate from Flow alpha/gating logic.
 
 ### Planned: M4 - Mainnet Production Executor
@@ -228,7 +228,11 @@ M4 progress:
 - [x] complete metrics verification
 - [x] add guarded mainnet micro-trade harness
 - [x] confirm devnet transaction construction without submission
-- [ ] run live M4 acceptance evidence
+- [ ] run live M4 acceptance evidence (100 micro-trades, landing rate ≥ 90%, p95 ≤ 15s, zero double-spends)
+- [ ] **[MUST]** Add priority fee hard cap and fixed fallback — Helius dynamic primary, fixed fallback, enforced cap prevents runaway fee draining wallet on live trades. (ref: `.ai/context/to-borrow-or-not.md`)
+- [ ] **[MUST]** Upgrade priority fee call to transaction-aware Helius request (pass serialized transaction for account context) — current call lacks this; flagged in adversarial review. (ref: `.ai/context/to-borrow-or-not.md`)
+- [ ] **[MUST]** Add SOL-spent reconciliation from pre/post SOL balances in confirmed transactions — persist `slippage_actual` (currently only token output delta is reconciled). (ref: `.ai/context/to-borrow-or-not.md`)
+- [ ] **[NICE]** Add loaded-account-data-size-limit compute budget instruction — only after live simulation evidence proves Jupiter routes tolerate it. (ref: `.ai/context/to-borrow-or-not.md`)
 
 ### Implemented Pending Live/Staging Evidence: M5-M7
 
@@ -240,6 +244,9 @@ M5 Jito integration now includes:
 - [x] no RPC fallback after Jito acceptance, including terminal `uncertain`
 - [x] deterministic tests for accepted bundle, fallback, and accepted-then-uncertain behavior
 - [ ] 100 live Jito round trips and explorer double-spend diff
+- [ ] **[MUST]** Prove Helius Sender path as alternate submission route — better landing without managing Jito manually; use for basic swaps where atomic execution is not required. (ref: `.ai/context/to-borrow-or-not.md`)
+- [ ] **[MUST]** Add staked backup RPC as fallback for pre-Jito-acceptance failures (Invariant I7 already gates post-acceptance correctly). (ref: `.ai/context/to-borrow-or-not.md`)
+- [ ] **[NICE]** Add bloXroute / Triton / Nozomi / QuickNode Lil' JIT as redundant landing routes alongside Jito — add only after Jito path has live evidence; do not rely on one path. (ref: `.ai/context/to-borrow-or-not.md`)
 
 M6 risk layer now includes:
 - [x] all hard blockers from spec section 4.1 with deterministic coverage
@@ -251,6 +258,7 @@ M6 risk layer now includes:
 - [ ] real Helius top-10 holder concentration integration
 - [ ] advisory tripwires persisted into `signals.result_json` on accepted trades
 - [ ] production kill-switch verification
+- [ ] **[MUST]** Add read-only RPC rate limiter with 429 backoff and jitter for RugCheck, Helius DAS, and holder-concentration calls — tripwire data fetches are read-only and must not cascade into executor failures when provider throttles. (ref: `.ai/context/to-borrow-or-not.md`)
 
 M7 observability now includes:
 - [x] Telegram posting helper
@@ -260,6 +268,7 @@ M7 observability now includes:
 - [ ] Telegram notifications wired into executor/webhook event paths
 - [ ] SLO evaluator wired to a scheduler or metrics snapshot source
 - [ ] staging verification that every Telegram event arrives
+- [ ] **[MUST]** Wire Telegram alerts for Flow dry-run accepted, dry-run rejected, invalid payload, and processing error outcomes — operators must see the dry-run stream without querying DB manually. (ref: `.ai/context/to-borrow-or-not.md`, Stage 5 tasks)
 
 ### Adversarial Review - 2026-05-05
 
@@ -277,7 +286,7 @@ Spec comparison and adversarial review found these issues and blockers:
 - Blocker: tripwire results are logged, and can block when `TRIPWIRES_AS_BLOCKERS=true`, but accepted-signal `result_json` does not yet persist `tripwires_triggered`.
 - Blocker: Telegram helpers exist but are not wired to actual trade confirmed/failed/rejected/uncertain/kill-switch/low-wallet-balance event paths.
 - Blocker: SLO alert evaluation exists but is not connected to rolling trade windows, Prometheus snapshots, a scheduler, or Telegram delivery.
-- Blocker: startup validation still does not execute Prisma migrations before accepting traffic; wallet load, RPC `getBalance`, and RPC `getLatestBlockhash` are now checked.
+- Fixed during Stage 5: `pnpm start` runs `pnpm db:ready` before serving, and startup validates Flow dry-run journal/attempt tables plus wallet/RPC readiness before binding the HTTP server.
 - Nuance: priority-fee client supports transaction-aware estimates, but the executor currently calls it without a serialized transaction, so Helius estimates may be less precise than the spec's best-practice path.
 - Nuance: confirmation expiry final-check is immediate; the spec sketch sleeps before final status check. Current behavior is deterministic but could classify near-expiry late landings more aggressively than intended.
 - Nuance: `uncertain` is used as the DB state and metric label. The prose in spec section 3.7 says write DB state `unknown`, while other spec areas use `uncertain`; this should be resolved as a documented amendment before live canary.
