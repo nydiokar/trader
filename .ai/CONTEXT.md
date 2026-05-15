@@ -46,6 +46,7 @@ Canonical spec: `solana-signal-bot-spec-v2.md`
 Goal: materialize a safe structured bridge from the existing Flow signal pipeline into this trader bot, starting with dry-run and progressing toward controlled live execution. Stage 1 is complete: the bot consumes the structured signal behind the Telegram branch, applies deterministic bot-side execution risk checks, writes either a dry-run order intent or exact reject reason, and persists one durable execution journal JSON. Stage 2/3 now add a config-gated Flow `trader_bot` delivery sink and authenticated trader dry-run HTTP intake without changing live `/signal` execution.
 
 Planning details are recorded in `.ai/context/flow-to-bot-dry-run-bridge.md`.
+Flow-to-Trader milestone definitions are recorded in `.ai/milestones/Flow-to-Trader-Roadmap.md`.
 
 Architecture alignment:
 - Flow Telegram messages are a branch from structured `PreparationOutput`; Telegram text is not the bot integration layer.
