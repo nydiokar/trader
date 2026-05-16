@@ -26,6 +26,7 @@ import {
   markFlowExecutionJournalProcessingError,
   persistInvalidFlowExecutionJournal,
   persistFlowDryRunAttempt,
+  queryFlowExecutionJournals,
   type ExecutionJournalRow,
 } from "../flow/execution-journal-db.js";
 import { runWithFlowDryRunExecutionBoundary } from "../flow/execution-boundary.js";
@@ -136,6 +137,24 @@ export async function registerRoutes(
     killSwitchGauge.set(config.KILL_SWITCH ? 1 : 0);
     const metrics = await register.metrics();
     return reply.header("Content-Type", register.contentType).send(metrics);
+  });
+
+  app.get("/flow/dry-run/decisions", async (request, reply) => {
+    await verifyHmac(request, reply);
+    if (reply.sent) return;
+
+    const query = request.query as Record<string, string>;
+    const limitRaw = parseInt(query["limit"] ?? "25", 10);
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 100) : 25;
+
+    const rows = await queryFlowExecutionJournals({ limit });
+    const decisions = rows.map(toDecisionFeedEntry);
+    return reply.code(200).send({
+      schema_version: "flow_decision_feed_v1",
+      live_execution_enabled: false,
+      count: decisions.length,
+      decisions,
+    });
   });
 
   app.post("/signal", async (request, reply) => {
@@ -551,6 +570,19 @@ export async function registerRoutes(
     }
     });
   });
+}
+
+function toDecisionFeedEntry(row: ExecutionJournalRow) {
+  return {
+    decision_id: row.journal_id,
+    token_ref: row.token_mint ?? null,
+    decision_status: row.state,
+    risk_decision: row.risk_decision ?? null,
+    blocker_codes: row.risk_decision === "rejected" && row.reject_reason ? [row.reject_reason] : [],
+    source: row.source_lane ?? null,
+    created_at: typeof row.created_at === "string" ? row.created_at : row.created_at.toISOString(),
+    live_execution_enabled: false,
+  };
 }
 
 function buildFlowDryRunResponse(
