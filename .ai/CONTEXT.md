@@ -1,6 +1,6 @@
 # Trader Bot - Project Context
 
-**Branch:** `main` | **Last Updated:** 2026-05-15 | **Status:** M0-M3 complete. M4-M5 core executor implemented with deterministic coverage; M6-M7 partially implemented; Flow-to-bot dry-run bridge Stages 1-5 complete for production dry-run observability; live trading promotion remains blocked.
+**Branch:** `main` | **Last Updated:** 2026-05-16 | **Status:** M0-M3 complete. M4-M5 core executor implemented with deterministic coverage; M6-M7 partially implemented; Flow-to-bot dry-run bridge Stages 1-5 complete for production dry-run observability; Stage 6 live-readiness recheck evaluator implemented; live trading promotion remains blocked.
 
 ---
 
@@ -181,6 +181,18 @@ Stage 5 complete - production dry-run observability:
 - [ ] **[MUST]** Add read-only RPC/Jupiter/Helius rate limiter with 429 backoff and jitter — prevents provider throttling from cascading into journal failures under real traffic. Do not apply to signed submission retries. (ref: `.ai/context/to-borrow-or-not.md`)
 - [x] Do not implement live buy promotion or sell logic in Stage 5; those belong to later milestones.
 
+Stage 6 partial - bot-owned live-readiness recheck evaluator:
+- [x] Defined `LiveReadinessDecision` schema (`schema_version: "flow_live_readiness_v1"`) separate from dry-run risk decision and `ExecutionJournal`.
+- [x] Implemented `evaluateLiveReadiness()` in `src/flow/live-readiness.ts`: reads accepted journal rows from DB and rechecks against current bot-owned state — price/liquidity availability, wallet floor, exposure cap, open token position, previously seen token, cooldown, signal freshness, kill switch, dry-run mode, live enable flag.
+- [x] `buildDefaultLiveReadinessState()` sources open positions and cooldown state from the live `trades` table (not Flow journals); kill switch from DB `walletState`; seen token mints from `execution_journal` distinct token_mints.
+- [x] Added CLI `pnpm flow:live-readiness` (`src/flow/live-readiness-report.ts`) with `--limit`, `--wallet-sol`, `--price-usd`, `--liquidity-usd`, `--state-file`, `--output`, `--format json|jsonl`, `--live-mode`, `--live-enabled` flags.
+- [x] All decisions carry `dry_run_risk_rerun: false` and `live_execution_enabled: false` hard-coded; `would_promote_live` and `blocker_codes` are machine-readable.
+- [x] `executor_path_summary` reads live Prometheus counters for `executor_path_reachability_total`; all paths show `invoked: false, count: 0` during dry-run operation.
+- [x] 10 deterministic tests in `tests/flow-live-readiness.test.ts` — schema fields, exact blocker codes, hypothetical promotion, self-not-blocking seen token, cooldown check, execution boundary guard throws on executor path invocation, `evaluateLiveReadiness` is synchronous and never touches executor paths, `dry_run_risk_rerun` always false.
+- [x] Bug fixed: cooldown cutoff was comparing unix seconds against `Date` object milliseconds (always treated every open trade as within cooldown); fixed to compare milliseconds throughout.
+- [x] Ran `pnpm flow:live-readiness` against real Stage 5 DB: 16 accepted journals evaluated, all `live_execution_enabled: false`, all executor paths `invoked: false`; export saved to `data/live-readiness-export.json`.
+- [ ] Remaining Stage 6 work: bot-owned price/liquidity refresh (currently operator-supplied via CLI flags), open-position state sourced from live trades only (no trades yet), `previously_seen_token` check is structurally inert for DB-backed batch evaluation (documented in source — requires per-signal query at live promotion time), Telegram alerts for dry-run accepted/rejected/readiness outcomes.
+
 Integration complete definition of done:
 - [x] Flow has a config-gated `trader_bot` sink beside Telegram/n8n.
 - [x] Trader has authenticated dry-run HTTP intake for Flow payloads.
@@ -228,10 +240,10 @@ M4 progress:
 - [x] complete metrics verification
 - [x] add guarded mainnet micro-trade harness
 - [x] confirm devnet transaction construction without submission
-- [ ] run live M4 acceptance evidence (100 micro-trades, landing rate ≥ 90%, p95 ≤ 15s, zero double-spends)
-- [ ] **[MUST]** Add priority fee hard cap and fixed fallback — Helius dynamic primary, fixed fallback, enforced cap prevents runaway fee draining wallet on live trades. (ref: `.ai/context/to-borrow-or-not.md`)
-- [ ] **[MUST]** Upgrade priority fee call to transaction-aware Helius request (pass serialized transaction for account context) — current call lacks this; flagged in adversarial review. (ref: `.ai/context/to-borrow-or-not.md`)
-- [ ] **[MUST]** Add SOL-spent reconciliation from pre/post SOL balances in confirmed transactions — persist `slippage_actual` (currently only token output delta is reconciled). (ref: `.ai/context/to-borrow-or-not.md`)
+- [x] priority fee hard cap (`PRIORITY_FEE_HARD_CAP_MICROLAMPORTS`) and fixed fallback (`PRIORITY_FEE_FALLBACK_MICROLAMPORTS`) — Helius dynamic primary, fixed fallback, capped final fee; all Helius failures return fallback instead of throwing.
+- [x] priority fee call upgraded to transaction-aware: first-pass tx serialized to base64 (`firstPassBase64`) and passed to `getPriorityFeeEstimate` before simulation.
+- [x] SOL-spent reconciliation: `reconcileSolSpent()` parses wallet pre/post balances and fee from confirmed tx, persists as `slippageActual` on the trade row.
+- [ ] **[BLOCKING]** Run live M4 acceptance evidence — 100 mainnet micro-trades, landing rate ≥ 90%, p95 ≤ 15s, zero double-spends. Operator action. Record in `.ai/milestones/M4-live-acceptance.md`.
 - [ ] **[NICE]** Add loaded-account-data-size-limit compute budget instruction — only after live simulation evidence proves Jupiter routes tolerate it. (ref: `.ai/context/to-borrow-or-not.md`)
 
 ### Implemented Pending Live/Staging Evidence: M5-M7
@@ -265,10 +277,10 @@ M7 observability now includes:
 - [x] formatted messages for confirmed, failed, rejected, uncertain, kill-switch, and low-wallet-balance events
 - [x] SLO alert evaluator for landing rate and p95 signal-to-confirm latency
 - [x] README note requiring a private, non-identifying Telegram channel/chat
-- [ ] Telegram notifications wired into executor/webhook event paths
-- [ ] SLO evaluator wired to a scheduler or metrics snapshot source
-- [ ] staging verification that every Telegram event arrives
-- [ ] **[MUST]** Wire Telegram alerts for Flow dry-run accepted, dry-run rejected, invalid payload, and processing error outcomes — operators must see the dry-run stream without querying DB manually. (ref: `.ai/context/to-borrow-or-not.md`, Stage 5 tasks)
+- [x] Telegram wired to confirmed/failed_onchain/expired/uncertain executor outcomes via `safeNotify`; `pre_submit_failed` intentionally excluded.
+- [x] SLO `runSloCheck()` runs after each terminal trade write using injectable `querySloWindow` + `sloWindowHours`; posts Telegram SLO alert if landing rate or p95 is breached.
+- [ ] staging verification that every Telegram event arrives (operator action — requires real trades)
+- [ ] **[MUST]** Wire Telegram alerts for Flow dry-run accepted, dry-run rejected, invalid payload, and processing error outcomes — operators are currently blind to the dry-run stream without querying DB manually. (ref: `.ai/context/to-borrow-or-not.md`, Stage 5 tasks)
 
 ### Adversarial Review - 2026-05-05
 
@@ -284,10 +296,10 @@ Spec comparison and adversarial review found these issues and blockers:
 - Blocker: default executor dependencies now use Jito first; this matches M5 direction but has not been canary-tested. Run only with tiny caps until live evidence exists.
 - Blocker: tripwire code currently aggregates injected advisory checks but does not fetch real RugCheck, mint/freeze authority, or holder concentration data.
 - Blocker: tripwire results are logged, and can block when `TRIPWIRES_AS_BLOCKERS=true`, but accepted-signal `result_json` does not yet persist `tripwires_triggered`.
-- Blocker: Telegram helpers exist but are not wired to actual trade confirmed/failed/rejected/uncertain/kill-switch/low-wallet-balance event paths.
-- Blocker: SLO alert evaluation exists but is not connected to rolling trade windows, Prometheus snapshots, a scheduler, or Telegram delivery.
+- Fixed (2026-05-15): Telegram wired to confirmed/failed_onchain/expired/uncertain executor outcomes; SLO evaluator runs after each terminal trade write and fires Telegram alert on landing rate or p95 breach.
+- Remaining: staging verification that every Telegram event type actually arrives requires real trades. Flow dry-run Telegram alerts (accepted/rejected/invalid/error) still unwired.
 - Fixed during Stage 5: `pnpm start` runs `pnpm db:ready` before serving, and startup validates Flow dry-run journal/attempt tables plus wallet/RPC readiness before binding the HTTP server.
-- Nuance: priority-fee client supports transaction-aware estimates, but the executor currently calls it without a serialized transaction, so Helius estimates may be less precise than the spec's best-practice path.
+- Fixed (2026-05-15): priority-fee call now passes the first-pass serialized transaction (`firstPassBase64`) to Helius for account-aware estimates.
 - Nuance: confirmation expiry final-check is immediate; the spec sketch sleeps before final status check. Current behavior is deterministic but could classify near-expiry late landings more aggressively than intended.
 - Nuance: `uncertain` is used as the DB state and metric label. The prose in spec section 3.7 says write DB state `unknown`, while other spec areas use `uncertain`; this should be resolved as a documented amendment before live canary.
 
@@ -390,8 +402,8 @@ Retry contract for the upstream sender:
 
 ## Current Operating Reality
 
-- `pnpm build` passes as of 2026-05-05.
-- `pnpm test` passes with 58 deterministic tests and 3 skipped guarded live tests as of 2026-05-05; guarded live Jupiter, guarded live devnet swap, and guarded live mainnet/Jito micro-trade tests remain opt-in.
+- `pnpm build` passes as of 2026-05-16.
+- `pnpm test` passes with 107 deterministic tests and 3 skipped guarded live tests as of 2026-05-16; guarded live Jupiter, guarded live devnet swap, and guarded live mainnet/Jito micro-trade tests remain opt-in.
 - `pnpm test` now includes deterministic mock coverage for Jupiter plus opt-in live paths gated by `RUN_LIVE_JUPITER_TESTS=true` and `RUN_DEVNET_SWAP_TESTS=true`.
 - The codebase now has an actual M1 ingress gate in `src/webhook/ingress.ts`, not just endpoint scaffolding.
 - `src/executor/jupiter.ts` is implemented and live-validated for quote and swap-instructions fetching.
@@ -410,6 +422,8 @@ Retry contract for the upstream sender:
 - `submit_to_confirm_seconds` is populated for submitted RPC transactions; full metrics completion remains an M4 acceptance item.
 - Risk blockers were pulled forward before additional live validation because devnet SOL is scarce and the executor should not be able to drain the funded wallet by mistake. Tripwires and Telegram delivery remain later milestones.
 - `/healthz` reports DB status, Solana RPC status, wallet SOL balance, and kill switch state; DB or RPC failure returns `503`.
+- `pnpm flow:live-readiness` evaluates accepted dry-run journals against current bot state and emits a machine-readable `flow_live_readiness_v1` JSON report with `would_promote_live`, `blocker_codes`, per-check statuses, and executor path summary. The command is read-only and cannot reach quote, signing, submission, or executor trading paths. Latest export: `data/live-readiness-export.json` (16 journals, all blocked by `live_execution_disabled`, 15 also by `signal_stale`, all executor paths `invoked: false`).
+- Known design limitation: `previously_seen_token` check in the live-readiness recheck is inert for DB-backed batch evaluation because the DB returns distinct token_mints including the current journal's token, which the evaluator filters out. The check becomes meaningful at single-signal live-promotion time when per-signal DB queries exclude the current signal. Documented in `src/flow/live-readiness.ts`.
 
 ---
 
