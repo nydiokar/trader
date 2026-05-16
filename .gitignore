@@ -5,6 +5,7 @@
 
 # Prisma generated client
 /generated/
+.claude
 
 # SQLite DB and data directory
 data/

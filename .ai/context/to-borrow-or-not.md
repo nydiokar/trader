@@ -39,4 +39,39 @@ Important context: that repo is a pump.fun/letsbonk sniper with its own listener
 The highest-value next implementation from this comparison is the read-only RPC rate limiter plus 429 backoff. It reduces operational failure without changing trading semantics or double-spend safety.
 
 
-source https://github.com/chainstacklabs/pumpfun-bonkfun-bot 
+source https://github.com/chainstacklabs/pumpfun-bonkfun-bot
+
+---
+
+## Practical Bot Architecture Reference
+
+**Execution pipeline:**
+```
+Quote engine
+  ↓
+Transaction builder
+  ↓
+Simulation
+  ↓
+Fee/tip estimator
+  ↓
+Submission router:
+    1. Helius Sender
+    2. Direct Jito bundle/tx
+    3. bloXroute
+    4. backup staked RPC
+  ↓
+Confirmation tracker
+  ↓
+Retry / cancel / rebuild logic
+```
+
+Do not rely on one path.
+
+**Decision rule:**
+- Use normal Helius RPC for basic swaps.
+- Use Helius Sender when you want better landing without managing Jito yourself.
+- Use direct Jito bundles when the strategy depends on atomic execution, MEV competition, backrunning, liquidation, or preventing partial failure.
+- Use bloXroute / Triton / Nozomi / QuickNode Lil' JIT as alternative or redundant landing routes.
+
+The edge is not "Helius vs Jito." The edge is routing + fee bidding + simulation + latency + retry discipline.

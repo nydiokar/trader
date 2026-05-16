@@ -119,6 +119,27 @@ async function postFlowSignal(app: Awaited<ReturnType<typeof makeApp>>["app"], p
 }
 
 describe("Flow dry-run HTTP intake", () => {
+  it("hard-fails if executor trading is reached inside the Flow dry-run boundary", async () => {
+    const { runWithFlowDryRunExecutionBoundary } = await import(
+      "../src/flow/execution-boundary.js"
+    );
+    const { executeSignalWithDependencies } = await import("../src/executor/index.js");
+
+    await expect(
+      runWithFlowDryRunExecutionBoundary(() =>
+        executeSignalWithDependencies(
+          {
+            signalId: "flow-boundary-violation",
+            tokenMint,
+            amountSol: 0.01,
+            maxSlippageBps: 300,
+          },
+          {} as never,
+        ),
+      ),
+    ).rejects.toThrow("flow dry-run executor boundary violation: executor_trading");
+  });
+
   it("rejects unauthenticated requests", async () => {
     const ctx = await makeApp();
     try {

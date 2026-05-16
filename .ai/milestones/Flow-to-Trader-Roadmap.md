@@ -53,6 +53,18 @@ This means the bridge foundation exists. It does not mean production trading is 
 - Flow scoring/gate changes.
 - Telegram/n8n behavior changes.
 
+**Tasks:**
+
+- [ ] Configure Flow production/staging `trader_bot` delivery with `FLOW_DRY_RUN_WEBHOOK_SECRET`; keep live execution disabled.
+- [ ] Verify startup/deploy migration procedure applies `execution_journal` migrations before traffic.
+- [ ] Run controlled dry-run stream from real Flow outbox deliveries and record journal counts by outcome.
+- [ ] Add Prometheus metrics for dry-run outcomes: received, accepted, rejected, duplicate, already_processing, invalid_payload, processing_error, stale_timeout, live_disabled.
+- [ ] Add Telegram/operator alert path for accepted dry-runs, rejected dry-runs, invalid payloads, and processing errors.
+- [ ] Add replay tooling for recent Flow signals through bot risk without trading (`src/flow/replay-flow-signals.ts`).
+- [ ] Add DB inspection/report tooling for `execution_journal` by token, run ID, decision, and reject reason.
+- [ ] Produce a Stage 5 evidence artifact with exact dates, config flags, sample journal IDs, outcome counts, and confirmation that no Jupiter/signing/submission path was called.
+- [ ] **[MUST]** Add read-only RPC/Jupiter/Helius rate limiter with 429 backoff and jitter — prevents provider throttling from cascading into journal failures under real traffic load. Do not apply to signed submission retries. (ref: `to-borrow-or-not.md`)
+
 **Done when:**
 
 - Real Flow deliveries produce durable trader `execution_journal` rows.
@@ -80,6 +92,18 @@ This means the bridge foundation exists. It does not mean production trading is 
 - Submitting trades.
 - Sell execution.
 - Strategy/alpha changes in Flow.
+
+**Tasks:**
+
+- [ ] Add bot-owned price/liquidity refresh before any live intent (bot-fetched quote, not only Flow snapshot).
+- [ ] Add open-position state table/tracker so the bot knows what it currently holds.
+- [ ] Add token cooldown state to prevent re-entering the same mint too quickly after a reject or exit.
+- [ ] Add wallet exposure accounting: track SOL committed to open positions, enforce max exposure cap.
+- [ ] Enforce kill switch and wallet floor in the live promotion path, separate from dry-run path.
+- [ ] Persist exact machine-readable reject reasons for all live-readiness blockers.
+- [ ] **[MUST]** Add SOL-spent reconciliation from pre/post SOL balances in confirmed transactions — persist `slippage_actual` so actual cost is auditable, not just token output. (ref: `to-borrow-or-not.md`)
+- [ ] **[MUST]** Wire Telegram alerts for accepted dry-runs, rejected dry-runs, live-readiness rejects, kill switch, and low wallet balance. (ref: `to-borrow-or-not.md`, M7)
+- [ ] **[NICE]** Add loaded-account-data-size-limit compute budget instruction — only after simulation evidence proves Jupiter routes tolerate it; reduces CU overhead. (ref: `to-borrow-or-not.md`)
 
 **Done when:**
 
@@ -113,6 +137,23 @@ This means the bridge foundation exists. It does not mean production trading is 
 - Multi-wallet trading.
 - Changing Flow signal generation.
 
+**Tasks:**
+
+- [ ] Complete M4 live acceptance evidence first (100 micro-trades, landing rate ≥ 90%, p95 ≤ 15s, zero double-spends).
+- [ ] Complete M5 live Jito evidence (100 round trips, explorer double-spend diff).
+- [ ] Wire M6 real tripwire integrations: RugCheck API, mint/freeze authority parsing, Helius top-10 holder concentration.
+- [ ] Wire M7 Telegram notifications to actual executor event paths (confirmed, failed, rejected, uncertain, kill switch, low balance).
+- [ ] Map accepted dry-run order intent into existing executor input shape (`token_mint`, `size_sol` → `amount_sol`, `slippage_bps`).
+- [ ] Link `execution_journal` row to resulting `trades` row via `trade_id`.
+- [ ] Enforce live promotion gate: bot config `live_execution_enabled=true`, `DRY_RUN=false`, kill switch off, wallet floor, fresh signal, unused idempotency, no open position.
+- [ ] **[MUST]** Upgrade priority fee estimates to transaction-aware Helius call (pass serialized transaction) — improves landing rates at real size; current call lacks account context. (ref: `to-borrow-or-not.md`, adversarial review nuance)
+- [ ] **[MUST]** Add priority fee hard cap and fixed fallback mode — Helius dynamic primary, fixed fallback, enforced cap. Prevents runaway fee estimate from draining wallet on live trades. (ref: `to-borrow-or-not.md`)
+- [ ] **[MUST]** Prove Helius Sender path as an alternative submission route before relying solely on direct Jito bundles — better landing without managing Jito manually; use for basic swaps. (ref: `to-borrow-or-not.md` architecture section)
+- [ ] **[MUST]** Wire SLO alert evaluator to rolling trade windows and Telegram delivery for landing rate and p95 latency. (ref: M7 blocker)
+- [ ] **[NICE]** Add bloXroute / Triton / Nozomi / QuickNode Lil' JIT as redundant submission route alongside Jito — do not rely on one path; add only after primary Jito path has live evidence. (ref: `to-borrow-or-not.md` architecture section)
+- [ ] **[NICE]** Add staked backup RPC as fallback for pre-Jito-acceptance submission failures (Invariant I7 already gates this correctly). (ref: `to-borrow-or-not.md`)
+- [ ] Record tiny-capital canary evidence: signature, route taken, confirmation, latency, quote out vs actual out, journal/trade state.
+
 **Done when:**
 
 - A tiny live buy canary completes with journal and trade reconciliation.
@@ -143,6 +184,21 @@ This means the bridge foundation exists. It does not mean production trading is 
 - Advanced portfolio optimization.
 - Raising size before exit reliability is proven.
 
+**Tasks:**
+
+- [ ] Add `positions` table: entry price, entry size, entry trade ID, mint, state machine (open → closing → closed/failed).
+- [ ] Reconcile confirmed buy trade into a position row with actual entry price from `slippage_actual` / token output delta.
+- [ ] Add stop-loss evaluator: evaluate open positions against current price and trigger exit order.
+- [ ] Add take-profit evaluator: configurable TP target per exit policy label.
+- [ ] Add time-based exit: configurable max hold duration per exit policy label.
+- [ ] Add manual/operator exit trigger via CLI or operator endpoint.
+- [ ] Build sell execution path: quote (sell side) → instructions → simulate → sign → Jito/RPC submit → confirm → reconcile → persist.
+- [ ] Post-sell reconciliation: parse token-out/SOL-in delta from confirmed sell transaction, close position row, record P&L.
+- [ ] Uncertain sell state is terminal human-intervention path — never auto-retry (mirrors Invariant I8 for buys).
+- [ ] **[MUST]** Decide and scope TP/SL logic borrow from reference sniper repo — their exit state machine may have patterns worth adapting even though strategy differs. (ref: `to-borrow-or-not.md` "not 100% sure" note)
+- [ ] **[MUST]** Add ATA (Associated Token Account) cleanup after successful sell or failed position — close/burn token accounts to reclaim rent. Only needed when sell engine is live. (ref: `to-borrow-or-not.md`)
+- [ ] **[NICE]** Add submission router with multiple paths for sell orders: Jito bundle (atomic exit), Helius Sender, staked RPC fallback — same routing discipline as buys. (ref: `to-borrow-or-not.md` architecture section)
+
 **Done when:**
 
 - A position can move from Flow signal to buy to tracked position to sell to closed state.
@@ -169,6 +225,19 @@ This means the bridge foundation exists. It does not mean production trading is 
 
 - Large capital deployment before evidence is clean.
 - Strategy tuning based on insufficient sample size.
+
+**Tasks:**
+
+- [ ] Run 5-7 day tiny-capital canary with full buy-hold-sell loop active.
+- [ ] Record landing rate, p50, p95, and any uncertain states across the canary window.
+- [ ] Perform explorer double-spend audit: confirm zero duplicate spends across all submitted transactions.
+- [ ] Perform reconciliation audit: verify every confirmed buy and sell has matching `slippage_actual` and P&L row.
+- [ ] Audit all Telegram alert types fired during canary: confirmed, failed, rejected, uncertain, kill switch, low balance, SLO breach.
+- [ ] Produce incident log for any unresolved uncertain states, failed reconciliations, or operator interventions during canary.
+- [ ] Document pause/inspect/resume/size-up operator procedure.
+- [ ] **[MUST]** Confirm submission router redundancy is operational before size-up — at minimum Jito primary + one fallback route active and proven during canary. (ref: `to-borrow-or-not.md` architecture section)
+- [ ] **[NICE]** Add bloXroute / Triton / Nozomi as third landing route if canary shows Jito-only landing gaps. (ref: `to-borrow-or-not.md`)
+- [ ] Only raise size caps after: canary landing rate ≥ 95%, p95 ≤ 10s, zero unresolved duplicate-spend, zero unresolved uncertain states, all alert types verified.
 
 **Done when:**
 
