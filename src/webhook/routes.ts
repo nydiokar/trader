@@ -28,6 +28,7 @@ import {
   persistFlowDryRunAttempt,
   type ExecutionJournalRow,
 } from "../flow/execution-journal-db.js";
+import { runWithFlowDryRunExecutionBoundary } from "../flow/execution-boundary.js";
 import type { ExecutionJournal, FlowRiskConfig, FlowSignalArtifact } from "../flow/schemas.js";
 import { runBlockers, runTripwires } from "../risk/index.js";
 import { getSolanaRpc, getTradingSigner } from "../solana/runtime.js";
@@ -273,6 +274,7 @@ export async function registerRoutes(
     await verifyFlowDryRunHmac(request, reply);
     if (reply.sent) return;
 
+    return runWithFlowDryRunExecutionBoundary(async () => {
     const now = new Date();
     const headerIdempotencyKey =
       typeof request.headers["idempotency-key"] === "string"
@@ -327,6 +329,15 @@ export async function registerRoutes(
       return reply.code(400).send(response);
     }
     const signalId = signal.signal_id;
+    logger.info(
+      {
+        signal_id: signalId,
+        token_mint: signal.token_mint,
+        idempotency_key: httpPayload.idempotencyKey,
+        schema_version: httpPayload.schemaVersion,
+      },
+      "flow dry-run signal accepted",
+    );
     let claim: Awaited<ReturnType<typeof claimFlowExecutionJournalInDb>> | null = null;
 
     try {
@@ -339,6 +350,15 @@ export async function registerRoutes(
       });
 
       if (claim.kind === "terminal") {
+        logger.info(
+          {
+            signal_id: signalId,
+            journal_id: claim.row.journal_id,
+            risk_decision: claim.row.risk_decision,
+            reject_reason: claim.row.reject_reason,
+          },
+          "flow dry-run duplicate (terminal)",
+        );
         const response = await buildFlowDryRunResponseFromDbRow("already_processed", claim.row);
         await persistFlowDryRunAttempt({
           status: "duplicate",
@@ -364,6 +384,10 @@ export async function registerRoutes(
       }
 
       if (claim.kind === "already_processing") {
+        logger.info(
+          { signal_id: signalId, journal_id: claim.row.journal_id },
+          "flow dry-run duplicate (already_processing)",
+        );
         const response = {
           status: "already_processing",
           state: "processing",
@@ -392,6 +416,10 @@ export async function registerRoutes(
       }
 
       if (claim.kind === "stale_marked_processing_error") {
+        logger.warn(
+          { signal_id: signalId, journal_id: claim.row.journal_id },
+          "flow dry-run stale lease reclaimed as processing_error",
+        );
         const response = await buildFlowDryRunResponseFromDbRow("processing_error", claim.row);
         await persistFlowDryRunAttempt({
           status: "processing_error",
@@ -450,6 +478,17 @@ export async function registerRoutes(
       await tryExportFlowDryRunJournalArtifact(completed);
       const status =
         completedJournal.risk_decision === "accepted" ? "dry_run_accepted" : "dry_run_rejected";
+      logger.info(
+        {
+          signal_id: signalId,
+          journal_id: completedJournal.journal_id,
+          risk_decision: completedJournal.risk_decision,
+          reject_reason: completedJournal.reject_reason ?? null,
+          dry_run_order: completedJournal.dry_run_order,
+          token_mint: signal.token_mint,
+        },
+        `flow dry-run ${status}`,
+      );
       const response = buildFlowDryRunResponse(status, completedJournal);
       await persistFlowDryRunAttempt({
         status: completedJournal.risk_decision === "accepted" ? "accepted" : "rejected",
@@ -510,6 +549,7 @@ export async function registerRoutes(
       flowDryRunDecisions.inc({ status: "processing_error" });
       return reply.code(500).send(response);
     }
+    });
   });
 }
 
