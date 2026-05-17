@@ -57,6 +57,7 @@ const ConfigSchema = z.object({
     .default("info")
     .transform((v) => v.toLowerCase())
     .pipe(z.enum(["fatal", "error", "warn", "info", "debug", "trace"])),
+  LOG_FILE: z.string().optional(),
 
   // Modes
   DRY_RUN: booleanEnv("false"),

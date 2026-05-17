@@ -17,6 +17,9 @@ data/
 dist/
 node_modules/
 
+# Logs
+logs/*.log
+
 # Misc
 *.bak
 .DS_Store
