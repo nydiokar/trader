@@ -3,6 +3,7 @@ import { db } from "../db/index.js";
 
 export type LiveSettings = {
   liveExecutionEnabled: boolean;
+  sellExecutionEnabled: boolean;
   buyAmountSol: number;
   maxSlippageBps: number;
   buyRetryAttempts: number;
@@ -42,6 +43,12 @@ const definitions: SettingDefinition[] = [
   {
     key: "liveExecutionEnabled",
     storageKey: "live_execution_enabled",
+    type: "boolean",
+    defaultValue: false,
+  },
+  {
+    key: "sellExecutionEnabled",
+    storageKey: "sell_execution_enabled",
     type: "boolean",
     defaultValue: false,
   },

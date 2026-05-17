@@ -21,6 +21,7 @@ function usage(): string {
     "",
     "Common keys:",
     "  live_execution_enabled",
+    "  sell_execution_enabled",
     "  buy_amount_sol",
     "  max_slippage_bps",
     "  buy_retry_attempts",
@@ -92,6 +93,7 @@ async function main(): Promise<void> {
 async function applyBuyOnlyPreset(): Promise<unknown[]> {
   const values: Array<[string, string]> = [
     ["live_execution_enabled", "true"],
+    ["sell_execution_enabled", "false"],
     ["buy_amount_sol", "0.0001"],
     ["per_trade_sol_cap", "0.0001"],
     ["daily_sol_cap", "0.1"],

@@ -62,7 +62,7 @@ async function validateFlowDryRunStorageReadiness(): Promise<void> {
   await db.$queryRaw`SELECT 1 FROM execution_journal LIMIT 1`;
   await db.$queryRaw`SELECT 1 FROM flow_dry_run_attempt LIMIT 1`;
   logger.info(
-    { live_execution_enabled: false },
+    { flow_dry_run_live_execution_enabled: false },
     "flow dry-run journal storage readiness validated",
   );
 }

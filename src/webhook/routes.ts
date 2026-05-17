@@ -12,6 +12,7 @@ import {
 import { config } from "../config.js";
 import { executeSignal } from "../executor/index.js";
 import { aggregateReadinessDecisions } from "../flow/live-readiness-aggregate.js";
+import { getLiveSettings, type LiveSettings } from "../runtime/live-settings.js";
 import {
   buildDefaultLiveReadinessState,
   emptyExecutorPathSummary,
@@ -88,6 +89,7 @@ type FlowDryRunProcessor = (payload: {
   writeJsonExport?: boolean;
   writeAttemptArtifact?: boolean;
 }) => Promise<ExecutionJournal>;
+type LiveSettingsLoader = () => Promise<LiveSettings>;
 
 export async function registerRoutes(
   app: FastifyInstance,
@@ -97,31 +99,18 @@ export async function registerRoutes(
     blockerCheck?: BlockerCheck;
     tripwireCheck?: TripwireCheck;
     flowDryRunProcessor?: FlowDryRunProcessor;
+    liveSettingsLoader?: LiveSettingsLoader;
     flowJournalDir?: string;
   },
 ): Promise<void> {
   const processSignal: SignalProcessor =
     options?.processSignal ??
-    (async (payload) =>
-      executeSignal(
-        payload.signal_id,
-        payload.token_mint,
-        payload.amount_sol,
-        payload.max_slippage_bps,
-        payload.entry_price_usd && payload.planned_exit_policy_label
-          ? {
-              runId: payload.run_id ?? null,
-              signalId: payload.signal_id,
-              entryPriceUsd: payload.entry_price_usd,
-              entryLiquidityUsd: payload.entry_liquidity_usd ?? null,
-              policyLabel: payload.planned_exit_policy_label,
-            }
-          : undefined,
-      ));
+    executeSignalWithRuntimeRetries;
   const healthCheck = options?.healthCheck ?? checkSolanaHealth;
   const blockerCheck = options?.blockerCheck ?? runBlockers;
   const tripwireCheck = options?.tripwireCheck ?? runTripwires;
   const flowDryRunProcessor = options?.flowDryRunProcessor ?? runFlowDryRun;
+  const liveSettingsLoader = options?.liveSettingsLoader ?? getLiveSettings;
   const flowJournalDir = options?.flowJournalDir ?? config.FLOW_EXECUTION_JOURNAL_DIR;
 
   app.get("/healthz", async (_req, reply) => {
@@ -260,10 +249,47 @@ export async function registerRoutes(
     signalsReceived.inc({ result: "accepted" });
 
     try {
+      const settings = await liveSettingsLoader();
+      const signalAgeSeconds = nowSeconds - payload.client_timestamp;
+      if (signalAgeSeconds > settings.signalMaxAgeSeconds) {
+        rejections.inc({ reason: "signal_stale" });
+        const rejectionResponse = {
+          status: "rejected",
+          decision: "signal_stale",
+          signal_id: payload.signal_id,
+          signal_age_seconds: signalAgeSeconds,
+        };
+        completeSignal(
+          payload.signal_id,
+          "rejected",
+          "signal_stale",
+          rejectionResponse,
+          Math.floor(Date.now() / 1000),
+        );
+        return reply.code(200).send(rejectionResponse);
+      }
+
+      const executionPayload = applyRuntimeBuySettings(payload, settings);
+      if (
+        executionPayload.amount_sol !== payload.amount_sol ||
+        executionPayload.max_slippage_bps !== payload.max_slippage_bps
+      ) {
+        logger.info(
+          {
+            signal_id: payload.signal_id,
+            incoming_amount_sol: payload.amount_sol,
+            execution_amount_sol: executionPayload.amount_sol,
+            incoming_slippage_bps: payload.max_slippage_bps,
+            execution_slippage_bps: executionPayload.max_slippage_bps,
+          },
+          "signal runtime buy settings applied",
+        );
+      }
+
       const blocker = await blockerCheck(
-        payload.signal_id,
-        payload.token_mint,
-        payload.amount_sol,
+        executionPayload.signal_id,
+        executionPayload.token_mint,
+        executionPayload.amount_sol,
       );
 
       if (blocker.blocked) {
@@ -286,7 +312,7 @@ export async function registerRoutes(
         return reply.code(statusCode).send(rejectionResponse);
       }
 
-      const tripwires = await tripwireCheck(payload.token_mint);
+      const tripwires = await tripwireCheck(executionPayload.token_mint);
       if (tripwires.triggered.length > 0) {
         logger.warn(
           {
@@ -318,7 +344,7 @@ export async function registerRoutes(
         }
       }
 
-      const result = await processSignal(payload);
+      const result = await processSignal(executionPayload);
 
       completeSignal(
         payload.signal_id,
@@ -668,6 +694,95 @@ export async function registerRoutes(
       });
     }
   });
+}
+
+function applyRuntimeBuySettings(
+  payload: Parameters<SignalProcessor>[0] & { nonce?: string; client_timestamp?: number },
+  settings: LiveSettings,
+): Parameters<SignalProcessor>[0] {
+  return {
+    ...payload,
+    amount_sol: settings.buyAmountSol,
+    max_slippage_bps: settings.maxSlippageBps,
+  };
+}
+
+async function executeSignalWithRuntimeRetries(
+  payload: Parameters<SignalProcessor>[0],
+): ReturnType<SignalProcessor> {
+  const settings = await getLiveSettings();
+  const attempts: Array<{
+    attempt: number;
+    slippage_bps: number;
+    state: "done" | "failed";
+    decision: string;
+    signature?: string;
+    retryable_pre_submit: boolean;
+  }> = [];
+
+  let finalResult: Awaited<ReturnType<typeof executeSignal>> | null = null;
+  const totalAttempts = Math.max(1, settings.buyRetryAttempts);
+
+  for (let index = 0; index < totalAttempts; index += 1) {
+    const attempt = index + 1;
+    const slippageBps = Math.min(
+      payload.max_slippage_bps + index * settings.retrySlippageStepBps,
+      settings.maxRetrySlippageBps,
+    );
+    const result = await executeSignal(
+      payload.signal_id,
+      payload.token_mint,
+      payload.amount_sol,
+      slippageBps,
+      payload.entry_price_usd && payload.planned_exit_policy_label
+        ? {
+            runId: payload.run_id ?? null,
+            signalId: payload.signal_id,
+            entryPriceUsd: payload.entry_price_usd,
+            entryLiquidityUsd: payload.entry_liquidity_usd ?? null,
+            policyLabel: payload.planned_exit_policy_label,
+          }
+        : undefined,
+    );
+    finalResult = result;
+
+    const response = responseRecord(result.response);
+    const retryablePreSubmit =
+      result.state === "failed" &&
+      result.decision === "pre_submit_failed" &&
+      typeof response["signature"] !== "string";
+    attempts.push({
+      attempt,
+      slippage_bps: slippageBps,
+      state: result.state,
+      decision: result.decision,
+      signature: typeof response["signature"] === "string" ? response["signature"] : undefined,
+      retryable_pre_submit: retryablePreSubmit,
+    });
+
+    if (!retryablePreSubmit) {
+      break;
+    }
+  }
+
+  if (!finalResult) {
+    throw new Error("signal execution did not run");
+  }
+
+  const response = responseRecord(finalResult.response);
+  return {
+    ...finalResult,
+    response: {
+      ...response,
+      attempts,
+    },
+  };
+}
+
+function responseRecord(response: unknown): Record<string, unknown> {
+  return typeof response === "object" && response !== null
+    ? response as Record<string, unknown>
+    : {};
 }
 
 function toDecisionFeedEntry(row: ExecutionJournalRow) {

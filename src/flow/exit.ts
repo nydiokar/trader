@@ -2,6 +2,7 @@ import { config } from "../config.js";
 import { db } from "../db/index.js";
 import { executeTokenSell } from "../executor/index.js";
 import { logger } from "../logger.js";
+import { getLiveSettings } from "../runtime/live-settings.js";
 import { getTradingSigner } from "../solana/runtime.js";
 import {
   FlowExitHttpEnvelopeSchema,
@@ -81,6 +82,25 @@ export async function handleFlowExitSignal(signal: FlowExitSignal): Promise<Flow
     return journalDryRunExit(signal);
   }
 
+  const settings = await getLiveSettings();
+  if (!settings.sellExecutionEnabled) {
+    const row = await upsertExitRow(signal, {
+      state: "sell_failed",
+      dryRun: false,
+      tokenAmountRaw: signal.token_amount_raw ?? null,
+      errorReason: "sell_execution_disabled",
+      errorMessage: "runtime sell_execution_enabled is false",
+      completedAt: new Date(),
+    });
+    return {
+      status: "failed",
+      position_id: signal.position_id,
+      journal_id: row.id,
+      dry_run: false,
+      error: "sell_execution_disabled",
+    };
+  }
+
   const claim = await claimExitForLiveSell(signal);
   if (claim.kind !== "claimed") {
     return claim.result;
@@ -110,7 +130,7 @@ export async function handleFlowExitSignal(signal: FlowExitSignal): Promise<Flow
     exitId: claim.row.id,
     tokenMint: signal.token_mint,
     tokenAmountRaw,
-    maxSlippageBps: config.DEFAULT_SLIPPAGE_BPS,
+    maxSlippageBps: settings.maxSlippageBps,
   });
 
   if (result.state !== "done" || result.response.status !== "confirmed") {

@@ -1,6 +1,7 @@
 import { config } from "../config.js";
 import { db } from "../db/index.js";
 import { dailySpendSol, killSwitchGauge, walletSolBalance } from "../metrics/registry.js";
+import { getLiveSettings } from "../runtime/live-settings.js";
 import { getSolanaRpc, getTradingSigner } from "../solana/runtime.js";
 
 // Spec 4.1 - pre-trade blockers.
@@ -13,8 +14,12 @@ type BlockerDependencies = {
     KILL_SWITCH: boolean;
     DAILY_SOL_CAP: number;
     PER_SIGNAL_SOL_CAP: number;
-    PER_TOKEN_COOLDOWN_MINUTES: number;
+    PER_TOKEN_COOLDOWN_MINUTES?: number;
+    TOKEN_COOLDOWN_SECONDS?: number;
     WALLET_SOL_FLOOR: number;
+    FEE_BUFFER_SOL?: number;
+    LIVE_EXECUTION_ENABLED?: boolean;
+    REQUIRE_LIVE_EXECUTION_ENABLED?: boolean;
   };
   now(): number;
   getWalletSol(): Promise<number>;
@@ -29,7 +34,7 @@ export async function runBlockers(
   tokenMint: string,
   amountSol: number,
 ): Promise<BlockerResult> {
-  return runBlockersWithDependencies(tokenMint, amountSol, defaultDependencies());
+  return runBlockersWithDependencies(tokenMint, amountSol, await defaultDependencies());
 }
 
 export async function runBlockersWithDependencies(
@@ -44,6 +49,13 @@ export async function runBlockersWithDependencies(
 
   killSwitchGauge.set(0);
 
+  if (
+    deps.config.REQUIRE_LIVE_EXECUTION_ENABLED === true &&
+    deps.config.LIVE_EXECUTION_ENABLED === false
+  ) {
+    return { blocked: true, reason: "live_execution_disabled" };
+  }
+
   if (amountSol > deps.config.PER_SIGNAL_SOL_CAP) {
     return { blocked: true, reason: "per_signal_cap" };
   }
@@ -56,7 +68,9 @@ export async function runBlockersWithDependencies(
   }
 
   const lastTradeCreatedAt = await deps.getLastTradeCreatedAt(tokenMint);
-  const cooldownSeconds = deps.config.PER_TOKEN_COOLDOWN_MINUTES * 60;
+  const cooldownSeconds =
+    deps.config.TOKEN_COOLDOWN_SECONDS ??
+    (deps.config.PER_TOKEN_COOLDOWN_MINUTES ?? 0) * 60;
   if (
     lastTradeCreatedAt !== null &&
     Math.floor(deps.now() / 1000) - lastTradeCreatedAt < cooldownSeconds
@@ -70,16 +84,27 @@ export async function runBlockersWithDependencies(
 
   const walletSol = await deps.getWalletSol();
   walletSolBalance.set(walletSol);
-  if (walletSol - amountSol < deps.config.WALLET_SOL_FLOOR) {
+  const feeBufferSol = deps.config.FEE_BUFFER_SOL ?? 0;
+  if (walletSol - amountSol - feeBufferSol < deps.config.WALLET_SOL_FLOOR) {
     return { blocked: true, reason: "insufficient_balance" };
   }
 
   return { blocked: false };
 }
 
-function defaultDependencies(): BlockerDependencies {
+async function defaultDependencies(): Promise<BlockerDependencies> {
+  const settings = await getLiveSettings();
   return {
-    config,
+    config: {
+      KILL_SWITCH: config.KILL_SWITCH,
+      DAILY_SOL_CAP: settings.dailySolCap,
+      PER_SIGNAL_SOL_CAP: settings.perTradeSolCap,
+      TOKEN_COOLDOWN_SECONDS: settings.tokenCooldownSeconds,
+      WALLET_SOL_FLOOR: settings.walletFloorSol,
+      FEE_BUFFER_SOL: settings.feeBufferSol,
+      LIVE_EXECUTION_ENABLED: settings.liveExecutionEnabled,
+      REQUIRE_LIVE_EXECUTION_ENABLED: !resolveDryRunMode(),
+    },
     now: () => Date.now(),
     async getWalletSol() {
       const rpc = getSolanaRpc();
@@ -126,6 +151,13 @@ function defaultDependencies(): BlockerDependencies {
       return row !== null;
     },
   };
+}
+
+function resolveDryRunMode(): boolean {
+  const raw = process.env["DRY_RUN"];
+  if (raw === "true") return true;
+  if (raw === "false") return false;
+  return config.DRY_RUN;
 }
 
 function getUtcStartOfDaySeconds(nowMs: number): number {
