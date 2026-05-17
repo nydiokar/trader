@@ -32,8 +32,8 @@ describe.skipIf(!runLive)("M4 mainnet micro-trade validation", () => {
 
       const tokenMint = process.env["MAINNET_MICRO_TRADE_TOKEN_MINT"] ?? usdcMint;
       const iterations = Number(process.env["MAINNET_MICRO_TRADE_ITERATIONS"] ?? "1");
-      if (!Number.isInteger(iterations) || iterations <= 0 || iterations > 100) {
-        throw new Error("MAINNET_MICRO_TRADE_ITERATIONS must be an integer from 1 to 100");
+      if (!Number.isInteger(iterations) || iterations <= 0 || iterations > 50) {
+        throw new Error("MAINNET_MICRO_TRADE_ITERATIONS must be an integer from 1 to 50");
       }
 
       const walletFloorSol = Number(process.env["MAINNET_MICRO_TRADE_WALLET_FLOOR_SOL"] ?? "0.05");
