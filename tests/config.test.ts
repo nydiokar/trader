@@ -9,8 +9,9 @@ describe("config defaults", () => {
     process.env["WEBHOOK_SECRET"] = "a".repeat(32);
     // Pin defaults explicitly because dotenv reloads the local .env file on import.
     delete process.env["LOG_LEVEL"];
-    delete process.env["DRY_RUN"];
-    delete process.env["KILL_SWITCH"];
+    process.env["DRY_RUN"] = "false";
+    process.env["KILL_SWITCH"] = "false";
+    process.env["FLOW_EXIT_POLL_ENABLED"] = "false";
     process.env["DAILY_SOL_CAP"] = "5";
     process.env["PER_SIGNAL_SOL_CAP"] = "1";
     process.env["PER_TOKEN_COOLDOWN_MINUTES"] = "30";

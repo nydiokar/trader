@@ -3,6 +3,7 @@ import { logger } from "./logger.js";
 import { connectDb, db, disconnectDb } from "./db/index.js";
 import { buildServer } from "./webhook/server.js";
 import { getSolanaRpc, getTradingSigner } from "./solana/runtime.js";
+import { FlowExitPoller } from "./flow/exit-poller.js";
 
 async function main(): Promise<void> {
   await connectDb();
@@ -17,8 +18,13 @@ async function main(): Promise<void> {
 
   logger.info({ address }, "trader bot listening");
 
+  const exitPoller = config.FLOW_EXIT_POLL_ENABLED ? new FlowExitPoller() : null;
+  exitPoller?.start();
+
   const shutdown = async (signal: string): Promise<void> => {
     logger.info({ signal }, "shutting down");
+    exitPoller?.stop();
+    await exitPoller?.drain();
     await app.close();
     await disconnectDb();
     process.exit(0);

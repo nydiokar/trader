@@ -54,6 +54,7 @@ async function makeApp(options: { dryRun?: boolean; tokensIngestBaseUrl?: string
   process.env["DATABASE_URL"] = `file:${dbPath}`;
   process.env["LOG_LEVEL"] = "fatal";
   process.env["DRY_RUN"] = options.dryRun === false ? "false" : "true";
+  process.env["FLOW_EXIT_POLL_ENABLED"] = "false";
   if (options.tokensIngestBaseUrl) {
     process.env["TOKENS_INGEST_BASE_URL"] = options.tokensIngestBaseUrl;
   } else {

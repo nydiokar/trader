@@ -35,6 +35,8 @@ const ConfigSchema = z.object({
   FLOW_DRY_RUN_PRODUCTION_TRIAL: booleanEnv("false"),
   TOKENS_INGEST_BASE_URL: z.string().url().optional(),
   TOKENS_INGEST_SERVICE_SECRET: z.string().min(32).optional(),
+  FLOW_EXIT_POLL_ENABLED: booleanEnv("false"),
+  FLOW_EXIT_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(30_000),
 
   // Risk
   DAILY_SOL_CAP: z.coerce.number().positive().default(5),
@@ -70,6 +72,14 @@ const ConfigSchema = z.object({
 
   // Database
   DATABASE_URL: z.string().default("file:./data/bot.db"),
+}).superRefine((value, ctx) => {
+  if (value.FLOW_EXIT_POLL_ENABLED && !value.TOKENS_INGEST_BASE_URL) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["TOKENS_INGEST_BASE_URL"],
+      message: "required when FLOW_EXIT_POLL_ENABLED=true",
+    });
+  }
 });
 
 // Startup validation — exits with code 1 on failure (spec §6.2)
