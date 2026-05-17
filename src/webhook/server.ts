@@ -3,23 +3,38 @@ import rateLimit from "@fastify/rate-limit";
 import { config } from "../config.js";
 import { registerRoutes } from "./routes.js";
 
+const isDev = process.env["NODE_ENV"] !== "production";
+
 export async function buildServer(
   options?: Parameters<typeof registerRoutes>[1],
 ): Promise<FastifyInstance> {
   const app = Fastify({
-    logger: {
-      level: config.LOG_LEVEL,
-      redact: {
-        paths: [
-          "*.privateKey",
-          "*.secretKey",
-          "*.keypair",
-          "*.secret",
-          'req.headers["x-signature"]',
-        ],
-        censor: "[REDACTED]",
-      },
-    },
+    logger: isDev
+      ? {
+          level: config.LOG_LEVEL,
+          transport: {
+            target: "pino-pretty",
+            options: {
+              colorize: true,
+              translateTime: "HH:MM:ss.l",
+              ignore: "pid,hostname",
+              levelFirst: true,
+            },
+          },
+        }
+      : {
+          level: config.LOG_LEVEL,
+          redact: {
+            paths: [
+              "*.privateKey",
+              "*.secretKey",
+              "*.keypair",
+              "*.secret",
+              'req.headers["x-signature"]',
+            ],
+            censor: "[REDACTED]",
+          },
+        },
   });
 
   // Spec §2.6 — 60 req/min per IP across all endpoints
