@@ -118,8 +118,9 @@ export async function evaluateAcceptedJournalRows(input: {
   rows: ExecutionJournalRow[];
   state: LiveReadinessState;
   now?: Date;
+  executorPathSummary?: Record<string, { invoked: boolean; count: number }>;
 }): Promise<LiveReadinessDecision[]> {
-  const pathSummary = await readExecutorPathSummary();
+  const pathSummary = input.executorPathSummary ?? await readExecutorPathSummary();
   return input.rows.map((row) => {
     const journal = executionJournalFromDbRow(row);
     if (!journal) {
@@ -286,7 +287,7 @@ async function readExecutorPathSummary(): Promise<Record<string, { invoked: bool
   return summary;
 }
 
-function emptyExecutorPathSummary(): Record<string, { invoked: boolean; count: number }> {
+export function emptyExecutorPathSummary(): Record<string, { invoked: boolean; count: number }> {
   return {
     executor_trading: { invoked: false, count: 0 },
     jupiter_quote: { invoked: false, count: 0 },

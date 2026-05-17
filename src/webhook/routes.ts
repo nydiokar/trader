@@ -11,6 +11,13 @@ import {
 } from "../metrics/registry.js";
 import { config } from "../config.js";
 import { executeSignal } from "../executor/index.js";
+import { aggregateReadinessDecisions } from "../flow/live-readiness-aggregate.js";
+import {
+  buildDefaultLiveReadinessState,
+  emptyExecutorPathSummary,
+  evaluateAcceptedJournalRows,
+  queryAcceptedFlowDryRunJournals,
+} from "../flow/live-readiness.js";
 import {
   extractFlowDryRunHttpPayload,
   normalizeFlowSignal,
@@ -173,6 +180,41 @@ export async function registerRoutes(
       count: decisions.length,
       decisions,
     });
+  });
+
+  app.get("/flow/dry-run/readiness-aggregate", async (request, reply) => {
+    await verifyHmac(request, reply);
+    if (reply.sent) return;
+
+    const query = request.query as Record<string, string>;
+    const limitRaw = Number(query["limit"] ?? "50");
+    const limit = Number.isInteger(limitRaw) && limitRaw > 0
+      ? Math.min(limitRaw, 100)
+      : 50;
+    const windowSecondsRaw = Number(query["window_seconds"] ?? "300");
+    const windowSeconds = Number.isInteger(windowSecondsRaw) && windowSecondsRaw > 0
+      ? Math.min(Math.max(windowSecondsRaw, 30), 3_600)
+      : 300;
+
+    const now = new Date();
+    const rows = await queryAcceptedFlowDryRunJournals(limit);
+    const state = await buildDefaultLiveReadinessState({
+      liveExecutionEnabled: false,
+      dryRunMode: true,
+      walletFloorSol: config.WALLET_SOL_FLOOR,
+      maxWalletExposureSol: config.DAILY_SOL_CAP,
+      maxSignalAgeSeconds: 15 * 60,
+      cooldownSeconds: config.PER_TOKEN_COOLDOWN_MINUTES * 60,
+      now,
+    });
+    const decisions = await evaluateAcceptedJournalRows({
+      rows,
+      state,
+      now,
+      executorPathSummary: emptyExecutorPathSummary(),
+    });
+    const aggregate = aggregateReadinessDecisions(decisions, now, windowSeconds);
+    return reply.code(200).send(aggregate);
   });
 
   app.post("/signal", async (request, reply) => {
