@@ -23,7 +23,6 @@
     "test:watch": "vitest",
     "flow:dry-run": "tsx src/flow/dry-run-flow-signal.ts",
     "live:promote": "tsx src/flow/live-promote.ts",
-    "live:trade": "tsx src/flow/live-trader.ts",
     "flow:stage5": "tsx src/flow/stage5-ops.ts",
     "flow:stage5:query": "tsx src/flow/stage5-ops.ts query",
     "flow:stage5:replay": "tsx src/flow/stage5-ops.ts replay",
