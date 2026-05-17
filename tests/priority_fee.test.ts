@@ -24,7 +24,7 @@ describe("Helius priority fee client", () => {
     const fee = await getPriorityFeeEstimate({
       rpcUrl: "https://helius.example",
       priorityLevel: "VeryHigh",
-      serializedTransaction: "signed-base64-tx",
+      serializedTransaction: "signed-base58-tx",
       fetchImpl,
       hardCapMicroLamports: 1_000_000,
       fallbackMicroLamports: 50_000,
@@ -33,7 +33,7 @@ describe("Helius priority fee client", () => {
     expect(fee).toBe(12_345n);
     const body = JSON.parse(String(fetchImpl.mock.calls[0]![1]!.body));
     expect(body.params[0]).toMatchObject({
-      transaction: "signed-base64-tx",
+      transaction: "signed-base58-tx",
       options: { priorityLevel: "VeryHigh" },
     });
   });

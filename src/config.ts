@@ -8,12 +8,27 @@ const booleanEnv = (def: "true" | "false") =>
     .default(def)
     .transform((v) => v === "true");
 
+function withHeliusApiKey(rpcUrl: string, apiKey?: string): string {
+  if (!apiKey) {
+    return rpcUrl;
+  }
+
+  const url = new URL(rpcUrl);
+  if (!url.hostname.endsWith("helius-rpc.com") || url.searchParams.has("api-key")) {
+    return rpcUrl;
+  }
+
+  url.searchParams.set("api-key", apiKey);
+  return url.toString();
+}
+
 const ConfigSchema = z.object({
   // Wallet
   WALLET_PRIVATE_KEY_BASE58: z.string().min(80),
 
   // RPC
   HELIUS_RPC_URL: z.string().url(),
+  HELIUS_API_KEY: z.string().optional(),
   HELIUS_RPC_URL_FALLBACK: z.string().url().optional(),
 
   // Jupiter
@@ -79,7 +94,10 @@ const ConfigSchema = z.object({
 
   // Database
   DATABASE_URL: z.string().default("file:./data/bot.db"),
-}).superRefine((value, ctx) => {
+}).transform((value) => ({
+  ...value,
+  HELIUS_RPC_URL: withHeliusApiKey(value.HELIUS_RPC_URL, value.HELIUS_API_KEY),
+})).superRefine((value, ctx) => {
   if (value.FLOW_EXIT_POLL_ENABLED && !value.TOKENS_INGEST_BASE_URL) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,

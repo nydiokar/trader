@@ -224,7 +224,7 @@ M4 task scaffold is recorded in `.ai/milestones/M4.md`. It decomposes the canoni
 - add post-trade reconciliation
 - add executor-level dry run
 - complete metrics verification
-- add guarded mainnet micro-trade harness
+- add guarded mainnet canary command
 - run and record live M4 acceptance evidence
 
 M4 remains RPC-only. Jito bundle submission and Jito fallback semantics are reserved for M5.
@@ -238,10 +238,10 @@ M4 progress:
 - [x] add post-trade reconciliation using confirmed transaction token balance deltas
 - [x] add executor-level dry run
 - [x] complete metrics verification
-- [x] add guarded mainnet micro-trade harness
+- [x] add guarded mainnet canary command outside the test suite
 - [x] confirm devnet transaction construction without submission
 - [x] priority fee hard cap (`PRIORITY_FEE_HARD_CAP_MICROLAMPORTS`) and fixed fallback (`PRIORITY_FEE_FALLBACK_MICROLAMPORTS`) — Helius dynamic primary, fixed fallback, capped final fee; all Helius failures return fallback instead of throwing.
-- [x] priority fee call upgraded to transaction-aware: first-pass tx serialized to base64 (`firstPassBase64`) and passed to `getPriorityFeeEstimate` before simulation.
+- [x] priority fee call upgraded to transaction-aware: first-pass tx converted to base58 and passed to `getPriorityFeeEstimate` before simulation.
 - [x] SOL-spent reconciliation: `reconcileSolSpent()` parses wallet pre/post balances and fee from confirmed tx, persists as `slippageActual` on the trade row.
 - [ ] **[BLOCKING]** Run live M4 acceptance evidence — 100 mainnet micro-trades, landing rate ≥ 90%, p95 ≤ 15s, zero double-spends. Operator action. Record in `.ai/milestones/M4-live-acceptance.md`.
 - [ ] **[NICE]** Add loaded-account-data-size-limit compute budget instruction — only after live simulation evidence proves Jupiter routes tolerate it. (ref: `.ai/context/to-borrow-or-not.md`)
@@ -403,7 +403,7 @@ Retry contract for the upstream sender:
 ## Current Operating Reality
 
 - `pnpm build` passes as of 2026-05-16.
-- `pnpm test` passes with 107 deterministic tests and 3 skipped guarded live tests as of 2026-05-16; guarded live Jupiter, guarded live devnet swap, and guarded live mainnet/Jito micro-trade tests remain opt-in.
+- `pnpm test` is deterministic-only for trader-owned execution; live mainnet buys are run through `pnpm canary:buy`, not Vitest.
 - `pnpm test` now includes deterministic mock coverage for Jupiter plus opt-in live paths gated by `RUN_LIVE_JUPITER_TESTS=true` and `RUN_DEVNET_SWAP_TESTS=true`.
 - The codebase now has an actual M1 ingress gate in `src/webhook/ingress.ts`, not just endpoint scaffolding.
 - `src/executor/jupiter.ts` is implemented and live-validated for quote and swap-instructions fetching.
@@ -413,7 +413,7 @@ Retry contract for the upstream sender:
 - Reconciliation failures for missing confirmed transactions or missing/unparseable wallet token balances are explicit: the trade remains chain-state `confirmed`, `error_msg` records the reconciliation failure, and the executor response returns `decision: "reconciliation_failed"`.
 - `DRY_RUN=true` now runs the executor through quote, swap-instructions, ALT hydration, priority fee, simulation, build, and signing, then persists a synthetic confirmed dry-run trade without calling `sendTransaction`, confirmation polling, or reconciliation.
 - `/metrics` now exposes all M4-required metric families and initialized labels deterministically; the webhook integration tests assert the required names and gauges.
-- A guarded mainnet micro-trade harness exists at `tests/executor.mainnet.live.test.ts`. It is skipped unless `RUN_MAINNET_MICRO_TRADE_TESTS=true`, `DRY_RUN=false`, and `MAINNET_MICRO_TRADE_CONFIRM=I_UNDERSTAND_THIS_SPENDS_REAL_SOL`; it defaults to 0.001 SOL into USDC and enforces amount/floor caps.
+- A guarded mainnet buy canary exists at `src/solana/canary-buy.ts` and is exposed as `pnpm canary:buy`. It defaults to quote/dry-run behavior; live submission requires `--live --confirm I_UNDERSTAND_THIS_SPENDS_REAL_SOL` and enforces amount/floor caps.
 - Default executor dependencies now use the Jito bundle path. Deterministic tests prove RPC fallback is only used before Jito accepts a bundle and is not used after accepted bundle uncertainty.
 - Telegram and SLO helpers are deterministic-test covered, but they are not yet wired to runtime events and no staging Telegram delivery has been performed.
 - `src/solana/devnet-transfer.ts` supports `--dry-run`, which fetches a devnet blockhash, builds and signs a versioned SOL transfer, prints the signature and base64 wire transaction, and does not call `sendTransaction`.
@@ -423,7 +423,49 @@ Retry contract for the upstream sender:
 - Risk blockers were pulled forward before additional live validation because devnet SOL is scarce and the executor should not be able to drain the funded wallet by mistake. Tripwires and Telegram delivery remain later milestones.
 - `/healthz` reports DB status, Solana RPC status, wallet SOL balance, and kill switch state; DB or RPC failure returns `503`.
 - `pnpm flow:live-readiness` evaluates accepted dry-run journals against current bot state and emits a machine-readable `flow_live_readiness_v1` JSON report with `would_promote_live`, `blocker_codes`, per-check statuses, and executor path summary. The command is read-only and cannot reach quote, signing, submission, or executor trading paths. Latest export: `data/live-readiness-export.json` (16 journals, all blocked by `live_execution_disabled`, 15 also by `signal_stale`, all executor paths `invoked: false`).
+- 2026-05-17 live canary: `pnpm canary:buy -- --live --confirm I_UNDERSTAND_THIS_SPENDS_REAL_SOL --amount-sol 0.0001` confirmed via Helius Sender. Signature `3NMpSvrvq2fXuKjaEq2beJsEXKDdfsgQvZtwHdc6xkfKoMAieAsyWSP22dmmxN6erYzxeLE8FtnrTzYQrKfyXc1r`, finalized `err: null`, actual out `0.008619` USDC, submit-to-confirm `2.842s`, wallet delta `-0.000329262` SOL.
+- 2026-05-17 signal-token live canary: `pnpm canary:buy -- --live --confirm I_UNDERSTAND_THIS_SPENDS_REAL_SOL --mint 6AYzKrHYAP34JwZqHt5kj2qRwDHAb9N6dJQcV9Tipump --amount-sol 0.0001` confirmed via Helius Sender. Signature `5smbUB4YA3zKr3Wg9wFjDT1Ecm28231KuXx4deaLBnetmpXUkZrvW5DyDgLn5uVKxo2Pnm14vsFQms5gaUXT4gBt`, finalized `err: null`, actual out `3532.411669`, submit-to-confirm `3.088s`, wallet delta `-0.00436436` SOL. This proved manual tiny buys for real signal token mints are viable, and exposed that first-time token account/rent/setup can exceed the previous `0.003` SOL canary buffer.
 - Known design limitation: `previously_seen_token` check in the live-readiness recheck is inert for DB-backed batch evaluation because the DB returns distinct token_mints including the current journal's token, which the evaluator filters out. The check becomes meaningful at single-signal live-promotion time when per-signal DB queries exclude the current signal. Documented in `src/flow/live-readiness.ts`.
+
+---
+
+## Next Moves To Live Trading
+
+Current readiness: manual tiny live buys from real signal token mints are ready through `pnpm canary:buy`; explicit sell canaries are available through `pnpm canary:sell`. Unattended automatic live trading from incoming Flow signals is not ready until the promotion path below is implemented and canaried.
+
+Runtime operator settings:
+- Runtime live settings are DB-backed in `runtime_settings`, so a long-running worker can read fresh values before each signal instead of requiring process restarts for every tuning change.
+- Operator CLI: `pnpm live:settings -- list`, `pnpm live:settings -- get <key>`, `pnpm live:settings -- set <key> <value>`, and `pnpm live:settings -- kill-switch on|off`.
+- Current runtime keys: `live_execution_enabled`, `buy_amount_sol`, `max_slippage_bps`, `buy_retry_attempts`, `sell_retry_attempts`, `retry_slippage_step_bps`, `max_retry_slippage_bps`, `wallet_floor_sol`, `fee_buffer_sol`, `max_estimated_spend_sol`, `daily_sol_cap`, `per_trade_sol_cap`, `max_open_positions`, `signal_max_age_seconds`, `token_cooldown_seconds`.
+- `pnpm canary:buy` now reads those settings by default and accepts CLI overrides per run. It retries only pre-submit failures with no signature, increasing slippage by `retry_slippage_step_bps` up to `max_retry_slippage_bps`. Once a transaction is accepted/submitted, retries stop.
+- `pnpm canary:sell` supports quote-only, dry-run, and live sell attempts by `--amount-raw` or `--percent`; it uses the same runtime slippage/retry/floor settings and also retries only pre-submit failures.
+- `pnpm live:promote` promotes accepted Flow dry-run journals into tiny live buys. Preview mode (`pnpm live:promote -- --limit 1`) never spends. Execute mode requires `--execute --confirm I_UNDERSTAND_THIS_SPENDS_REAL_SOL`, runtime `live_execution_enabled=true`, `DRY_RUN=false`, kill switch off, wallet floor, daily cap, per-trade cap, max-open-position, freshness, and cooldown gates.
+- Executor dry-run mode now resolves `process.env.DRY_RUN` at execution time before falling back to parsed config. Operator commands can force dry-run/live behavior for their own process without editing `.env` and restarting the bot.
+
+Immediate manual canary mode:
+- Use `pnpm canary:buy -- --quote-only --mint <TOKEN_MINT> --amount-sol 0.0001` to test route availability.
+- Use `pnpm canary:buy -- --mint <TOKEN_MINT> --amount-sol 0.0001` to dry-run quote/build/sign/simulate with no submission.
+- Use `pnpm canary:buy -- --live --confirm I_UNDERSTAND_THIS_SPENDS_REAL_SOL --mint <TOKEN_MINT> --amount-sol 0.0001` for explicit one-shot buys only.
+- Use `pnpm canary:sell -- --quote-only --mint <TOKEN_MINT> --percent 25` to test exit route availability without signing/submission.
+- Use `pnpm canary:sell -- --live --confirm I_UNDERSTAND_THIS_SPENDS_REAL_SOL --mint <TOKEN_MINT> --percent 25` for explicit one-shot sell canaries.
+- Keep canary amounts at `0.0001` SOL until we have a sample across real signal mints. The default canary fee buffer is now `0.006` SOL because first-time token buys can include token-account rent/setup beyond swap input, Sender tip, and transaction fee.
+
+Required build work before automatic live promotion:
+- [x] Add a bot-owned live promotion command that maps an accepted dry-run journal into `executeSignal(signalId, tokenMint, amountSol, slippageBps)`. Flow payloads must not directly enable live execution.
+- [x] Add explicit gates: runtime `live_execution_enabled=true`, `DRY_RUN=false`, kill switch off, wallet floor enforced, daily SOL cap enforced, per-trade SOL cap enforced, and max open positions enforced.
+- [x] Add per-signal live gates: signal freshness, no existing open position for the mint, token cooldown satisfied, and wallet remains above floor after input plus conservative setup/tip/fee buffer.
+- [x] Add bounded rebuild logic for pre-submit failures only. Never retry automatically after Sender/Jito/RPC acceptance; accepted-but-not-confirmed stays `uncertain`.
+- [ ] Add the daemon/loop mode around `live:promote` if we want unattended processing instead of one-shot operator execution.
+- Add visibility fields/reporting for live canaries: quoted out, actual out, quoted vs actual bps, Jupiter slippage bps, price impact, priority fee raw vs clamped, Sender tip, base fee, rent/setup SOL delta, total wallet SOL delta, submit path, confirmation latency, failure category, and explorer URL.
+- Fix naming/semantics around `trades.slippageActual`: today it is populated from SOL spent reconciliation and can include token account rent/setup/tip effects. For live analysis we need a separate true swap-slippage metric plus a separate total wallet-cost metric.
+- Add `pnpm canary:report` or equivalent to summarize the last N live canaries by landing rate, p50/p95 confirmation latency, quote failures, simulation/slippage failures, priority-fee clamps, wallet SOL delta, and per-mint outcomes.
+- Wire Telegram/operator alerts for live accepted, confirmed, failed, expired, uncertain, low wallet balance, kill switch, and SLO breach events before unattended runs.
+- Decide the first automatic-live policy: start with buy-only tiny canary mode, `amountSol=0.0001`, daily cap around a few canaries, one open position per mint, manual sell allowed. Full unattended production still needs exit/sell lifecycle evidence.
+
+Acceptance path:
+- Phase A: collect 10-20 manual `canary:buy` attempts on real signal mints and record failure reasons, slippage settings, landing rate, and wallet deltas.
+- Phase B: implement the live promotion worker behind gates and run it on one accepted signal at a time with the same `0.0001` SOL size.
+- Phase C: run a tiny automatic canary window with daily cap, alerts on, and report evidence. Only raise size after landing rate, latency, duplicate-spend, slippage/failure, and operator visibility are acceptable.
 
 ---
 

@@ -6,6 +6,7 @@ describe("config defaults", () => {
     // Set minimum required env vars before importing config
     process.env["WALLET_PRIVATE_KEY_BASE58"] = "A".repeat(88);
     process.env["HELIUS_RPC_URL"] = "https://mainnet.helius-rpc.com/?api-key=test";
+    process.env["HELIUS_API_KEY"] = "";
     process.env["WEBHOOK_SECRET"] = "a".repeat(32);
     // Pin defaults explicitly because dotenv reloads the local .env file on import.
     delete process.env["LOG_LEVEL"];
@@ -37,5 +38,17 @@ describe("config defaults", () => {
     expect(config.SUBMISSION_FALLBACK_RPC).toBe(true);
     expect(config.HELIUS_SENDER_TIP_LAMPORTS).toBe(200_000);
     expect(config.WEBHOOK_PORT).toBe(8089);
+  });
+
+  it("derives Helius RPC query key from HELIUS_API_KEY when URL is bare", async () => {
+    vi.resetModules();
+    process.env["HELIUS_RPC_URL"] = "https://mainnet.helius-rpc.com/";
+    process.env["HELIUS_API_KEY"] = "derived-test-key";
+
+    const { config } = await import("../src/config.js");
+
+    expect(config.HELIUS_RPC_URL).toBe(
+      "https://mainnet.helius-rpc.com/?api-key=derived-test-key",
+    );
   });
 });

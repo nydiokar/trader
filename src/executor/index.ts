@@ -1,4 +1,5 @@
 import type { QuoteResponse, SwapInstructionsResponse } from "@jup-ag/api";
+import bs58 from "bs58";
 import {
   AccountRole,
   type Address,
@@ -216,7 +217,7 @@ function defaultDependencies(): Promise<ExecutorDependencies> {
     submissionFallbackRpc: config.SUBMISSION_FALLBACK_RPC,
     heliusSenderTipLamports: BigInt(config.HELIUS_SENDER_TIP_LAMPORTS),
     jitoTipLamports: BigInt(config.JITO_TIP_LAMPORTS),
-    dryRun: config.DRY_RUN,
+    dryRun: resolveDryRunMode(),
     notify,
     querySloWindow: defaultSloQuery,
     sloWindowHours: config.SLO_WINDOW_HOURS,
@@ -226,6 +227,13 @@ function defaultDependencies(): Promise<ExecutorDependencies> {
     ...deps,
     wallet: await getTradingSigner(),
   }));
+}
+
+function resolveDryRunMode(): boolean {
+  const raw = process.env["DRY_RUN"];
+  if (raw === "true") return true;
+  if (raw === "false") return false;
+  return config.DRY_RUN;
 }
 
 export async function executeSignal(
@@ -862,9 +870,10 @@ async function buildSwapTransaction(
   );
 
   const firstPassBase64 = getBase64EncodedWireTransaction(firstPassTransaction);
+  const firstPassBase58 = bs58.encode(Buffer.from(firstPassBase64, "base64"));
 
   // Fetch the real priority fee with transaction context for accurate account-aware estimate.
-  const priorityFeeMicroLamports = await priorityFeeClient.getPriorityFeeEstimate(firstPassBase64);
+  const priorityFeeMicroLamports = await priorityFeeClient.getPriorityFeeEstimate(firstPassBase58);
 
   const simulation = await connection.simulateTransaction(firstPassBase64);
   if (simulation.err) {
