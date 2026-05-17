@@ -7,7 +7,7 @@ import {
 } from "../runtime/live-settings.js";
 import { disconnectDb } from "../db/index.js";
 
-type Command = "list" | "get" | "set" | "kill-switch" | "help";
+type Command = "list" | "get" | "set" | "preset" | "kill-switch" | "help";
 
 function usage(): string {
   return [
@@ -16,6 +16,7 @@ function usage(): string {
     "  pnpm live:settings -- list",
     "  pnpm live:settings -- get <key>",
     "  pnpm live:settings -- set <key> <value>",
+    "  pnpm live:settings -- preset buy-only",
     "  pnpm live:settings -- kill-switch on|off",
     "",
     "Common keys:",
@@ -69,6 +70,14 @@ async function main(): Promise<void> {
       return;
     }
 
+    if (command === "preset") {
+      const preset = required(argv[1], "preset");
+      if (preset !== "buy-only") fail("known presets: buy-only");
+      const updates = await applyBuyOnlyPreset();
+      console.log(JSON.stringify({ preset, updates }, null, 2));
+      return;
+    }
+
     const state = required(argv[1], "on|off");
     if (state !== "on" && state !== "off") {
       fail("kill-switch must be on or off");
@@ -78,6 +87,31 @@ async function main(): Promise<void> {
   } finally {
     await disconnectDb();
   }
+}
+
+async function applyBuyOnlyPreset(): Promise<unknown[]> {
+  const values: Array<[string, string]> = [
+    ["live_execution_enabled", "true"],
+    ["buy_amount_sol", "0.0001"],
+    ["per_trade_sol_cap", "0.0001"],
+    ["daily_sol_cap", "0.1"],
+    ["wallet_floor_sol", "0.15"],
+    ["fee_buffer_sol", "0.006"],
+    ["max_estimated_spend_sol", "0.007"],
+    ["max_slippage_bps", "600"],
+    ["buy_retry_attempts", "3"],
+    ["retry_slippage_step_bps", "300"],
+    ["max_retry_slippage_bps", "1200"],
+    ["max_open_positions", "100"],
+    ["signal_max_age_seconds", "600"],
+    ["token_cooldown_seconds", "0"],
+  ];
+  const updates = [];
+  for (const [key, value] of values) {
+    updates.push(await setLiveSetting(key, value));
+  }
+  updates.push(await setDbKillSwitch(false));
+  return updates;
 }
 
 async function printList(): Promise<void> {
@@ -98,7 +132,15 @@ async function printList(): Promise<void> {
 
 function parseCommand(raw: string | undefined): Command {
   if (!raw || raw === "list") return "list";
-  if (raw === "get" || raw === "set" || raw === "kill-switch" || raw === "help" || raw === "--help" || raw === "-h") {
+  if (
+    raw === "get" ||
+    raw === "set" ||
+    raw === "preset" ||
+    raw === "kill-switch" ||
+    raw === "help" ||
+    raw === "--help" ||
+    raw === "-h"
+  ) {
     return raw === "--help" || raw === "-h" ? "help" : raw;
   }
   fail(`unknown command: ${raw}`);

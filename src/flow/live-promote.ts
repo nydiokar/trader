@@ -1,3 +1,4 @@
+import { pathToFileURL } from "node:url";
 import { db, disconnectDb } from "../db/index.js";
 import { config } from "../config.js";
 import { executeSignal } from "../executor/index.js";
@@ -8,14 +9,14 @@ import {
   type ExecutionJournalRow,
 } from "./execution-journal-db.js";
 
-const LIVE_CONFIRMATION = "I_UNDERSTAND_THIS_SPENDS_REAL_SOL";
+export const LIVE_CONFIRMATION = "I_UNDERSTAND_THIS_SPENDS_REAL_SOL";
 
 type PromotionRow = ExecutionJournalRow & {
   trade_id: number | null;
   live_promoted_at: string | Date | null;
 };
 
-type Options = {
+export type LivePromotionOptions = {
   limit: number;
   journalId?: string;
   signalId?: string;
@@ -43,95 +44,99 @@ function usage(): string {
 
 async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2));
-  process.env["DRY_RUN"] = options.execute ? "false" : "true";
-  const settings = await getLiveSettings();
-  const rows = await queryPromotionRows(options);
-  const results = [];
-
   try {
-    for (const row of rows) {
-      const journal = executionJournalFromDbRow(row);
-      if (!journal || !journal.dry_run_order) {
-        results.push({
-          journal_id: row.journal_id,
-          status: "blocked",
-          blockers: ["dry_run_order_missing"],
-        });
-        continue;
-      }
-
-      const gate = await evaluateGates(row, settings);
-      if (!gate.ok) {
-        results.push({
-          journal_id: row.journal_id,
-          flow_signal_id: row.flow_signal_id,
-          token_mint: row.token_mint,
-          status: "blocked",
-          blockers: gate.blockers,
-          details: gate.details,
-        });
-        continue;
-      }
-
-      if (!options.execute) {
-        results.push({
-          journal_id: row.journal_id,
-          flow_signal_id: row.flow_signal_id,
-          token_mint: row.token_mint,
-          status: "ready",
-          would_execute: true,
-          amount_sol: gate.amountSol,
-          slippage_bps: gate.slippageBps,
-          wallet_sol: gate.walletSol,
-        });
-        continue;
-      }
-
-      if (options.confirm !== LIVE_CONFIRMATION) {
-        results.push({
-          journal_id: row.journal_id,
-          status: "blocked",
-          blockers: ["confirmation_missing"],
-        });
-        continue;
-      }
-
-      const execution = await executeWithRetries(row, gate.amountSol, gate.slippageBps, settings);
-      if (execution.tradeId !== null) {
-        await markPromoted(row.journal_id, execution.tradeId);
-      }
-      results.push({
-        journal_id: row.journal_id,
-        flow_signal_id: row.flow_signal_id,
-        token_mint: row.token_mint,
-        status: execution.status,
-        amount_sol: gate.amountSol,
-        attempts: execution.attempts,
-        trade_id: execution.tradeId,
-        signature: execution.signature,
-        explorer_url: execution.signature ? `https://solscan.io/tx/${execution.signature}` : undefined,
-      });
-    }
-
-    console.log(
-      JSON.stringify(
-        {
-          generated_at: new Date().toISOString(),
-          execute: options.execute,
-          settings,
-          count: results.length,
-          results,
-        },
-        null,
-        2,
-      ),
-    );
+    console.log(JSON.stringify(await runLivePromotionCycle(options), null, 2));
   } finally {
     await disconnectDb();
   }
 }
 
-async function queryPromotionRows(options: Options): Promise<PromotionRow[]> {
+export async function runLivePromotionCycle(options: LivePromotionOptions): Promise<{
+  generated_at: string;
+  execute: boolean;
+  settings: Awaited<ReturnType<typeof getLiveSettings>>;
+  count: number;
+  results: Array<Record<string, unknown>>;
+}> {
+  process.env["DRY_RUN"] = options.execute ? "false" : "true";
+  const settings = await getLiveSettings();
+  const rows = await queryPromotionRows(options);
+  const results: Array<Record<string, unknown>> = [];
+
+  for (const row of rows) {
+    const journal = executionJournalFromDbRow(row);
+    if (!journal || !journal.dry_run_order) {
+      results.push({
+        journal_id: row.journal_id,
+        status: "blocked",
+        blockers: ["dry_run_order_missing"],
+      });
+      continue;
+    }
+
+    const gate = await evaluateGates(row, settings);
+    if (!gate.ok) {
+      results.push({
+        journal_id: row.journal_id,
+        flow_signal_id: row.flow_signal_id,
+        token_mint: row.token_mint,
+        status: "blocked",
+        blockers: gate.blockers,
+        details: gate.details,
+      });
+      continue;
+    }
+
+    if (!options.execute) {
+      results.push({
+        journal_id: row.journal_id,
+        flow_signal_id: row.flow_signal_id,
+        token_mint: row.token_mint,
+        status: "ready",
+        would_execute: true,
+        amount_sol: gate.amountSol,
+        slippage_bps: gate.slippageBps,
+        wallet_sol: gate.walletSol,
+      });
+      continue;
+    }
+
+    if (options.confirm !== LIVE_CONFIRMATION) {
+      results.push({
+        journal_id: row.journal_id,
+        status: "blocked",
+        blockers: ["confirmation_missing"],
+      });
+      continue;
+    }
+
+    const execution = await executeWithRetries(row, gate.amountSol, gate.slippageBps, settings);
+    if (execution.tradeId !== null) {
+      await markPromoted(row.journal_id, execution.tradeId);
+    }
+    results.push({
+      journal_id: row.journal_id,
+      flow_signal_id: row.flow_signal_id,
+      token_mint: row.token_mint,
+      status: execution.status,
+      amount_sol: gate.amountSol,
+      attempts: execution.attempts,
+      trade_id: execution.tradeId,
+      signature: execution.signature,
+      explorer_url: execution.signature ? `https://solscan.io/tx/${execution.signature}` : undefined,
+    });
+  }
+
+  return {
+    generated_at: new Date().toISOString(),
+    execute: options.execute,
+    settings,
+    count: results.length,
+    results,
+  };
+}
+
+async function queryPromotionRows(options: LivePromotionOptions): Promise<PromotionRow[]> {
   const limit = Math.min(Math.max(options.limit, 1), 25);
   return db.$queryRaw<PromotionRow[]>`
     SELECT *
@@ -142,7 +147,7 @@ async function queryPromotionRows(options: Options): Promise<PromotionRow[]> {
       AND live_promoted_at IS NULL
       AND (${options.journalId ?? null} IS NULL OR journal_id = ${options.journalId ?? null})
       AND (${options.signalId ?? null} IS NULL OR flow_signal_id = ${options.signalId ?? null})
-    ORDER BY created_at ASC
+    ORDER BY created_at DESC
     LIMIT ${limit}
   `;
 }
@@ -406,8 +411,8 @@ function getUtcStartOfDaySeconds(nowMs: number): number {
   );
 }
 
-function parseArgs(argv: string[]): Options {
-  const options: Options = {
+function parseArgs(argv: string[]): LivePromotionOptions {
+  const options: LivePromotionOptions = {
     limit: 1,
     execute: false,
   };
@@ -455,7 +460,9 @@ function parsePositiveInteger(key: string, value: string): number {
   return parsed;
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.stack : error);
-  process.exit(1);
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.stack : error);
+    process.exit(1);
+  });
+}
