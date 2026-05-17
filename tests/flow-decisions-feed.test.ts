@@ -2,6 +2,7 @@ import { createHmac } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import Database from "better-sqlite3";
 import { describe, expect, it, vi } from "vitest";
 import type { FlowSignalArtifact } from "../src/flow/schemas.js";
 
@@ -73,7 +74,7 @@ async function makeApp() {
   process.env["DATABASE_URL"] = `file:${dbPath}`;
   process.env["LOG_LEVEL"] = "fatal";
 
-  const sqlite = (await import("better-sqlite3")).default(dbPath);
+  const sqlite = new Database(dbPath);
   sqlite.exec(migrationSql);
   sqlite.close();
 
@@ -184,6 +185,8 @@ describe("GET /flow/dry-run/decisions", () => {
       expect(body.count).toBe(1);
 
       const [entry] = body.decisions as Record<string, unknown>[];
+      expect(entry).toBeDefined();
+      if (!entry) throw new Error("expected one decision feed entry");
       expect(typeof entry["decision_id"]).toBe("string");
       expect(entry["token_ref"]).toBe(tokenMint);
       expect(entry["decision_status"]).toBe("accepted");
@@ -226,6 +229,8 @@ describe("GET /flow/dry-run/decisions", () => {
       const res = await getFeed(ctx.app);
       expect(res.statusCode).toBe(200);
       const [entry] = res.json().decisions as Record<string, unknown>[];
+      expect(entry).toBeDefined();
+      if (!entry) throw new Error("expected one decision feed entry");
       expect(entry["decision_status"]).toBe("rejected");
       expect(entry["risk_decision"]).toBe("rejected");
       expect(entry["blocker_codes"]).toEqual(["missing_price_data"]);
@@ -243,6 +248,8 @@ describe("GET /flow/dry-run/decisions", () => {
 
       const res = await getFeed(ctx.app);
       const [entry] = res.json().decisions as Record<string, unknown>[];
+      expect(entry).toBeDefined();
+      if (!entry) throw new Error("expected one decision feed entry");
       expect(entry["decision_status"]).toBe("accepted");
       expect(entry["blocker_codes"]).toEqual([]);
     } finally {

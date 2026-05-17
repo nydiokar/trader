@@ -7,7 +7,7 @@ import { config } from "../config.js";
 import { assertExecutorPathNotReachableFromFlowDryRun } from "../flow/execution-boundary.js";
 import { executorPathReachability, quoteLatencySeconds } from "../metrics/registry.js";
 
-const WSOL_MINT = "So11111111111111111111111111111111111111112";
+export const WSOL_MINT = "So11111111111111111111111111111111111111112";
 
 export class JupiterApiError extends Error {
   constructor(
@@ -34,16 +34,33 @@ export async function getQuote(
   amountSol: number,
   maxSlippageBps: number,
 ): Promise<QuoteResponse> {
+  const lamports = Math.floor(amountSol * 1_000_000_000);
+  return getQuoteForSwap(WSOL_MINT, tokenMint, lamports.toString(), maxSlippageBps);
+}
+
+export async function getQuoteForSwap(
+  inputMint: string,
+  outputMint: string,
+  amountRaw: string,
+  maxSlippageBps: number,
+): Promise<QuoteResponse> {
   assertExecutorPathNotReachableFromFlowDryRun("jupiter_quote");
   executorPathReachability.inc({ path: "jupiter_quote" });
   const stopTimer = quoteLatencySeconds.startTimer();
 
   try {
-    const lamports = Math.floor(amountSol * 1_000_000_000);
+    const amount = Number(amountRaw);
+    if (!Number.isSafeInteger(amount) || amount <= 0) {
+      throw new JupiterApiError(
+        "invalid_quote",
+        "Jupiter quote amount exceeds JavaScript safe integer range",
+      );
+    }
+
     const quote = await jupiter.quoteGet({
-      inputMint: WSOL_MINT,
-      outputMint: tokenMint,
-      amount: lamports,
+      inputMint,
+      outputMint,
+      amount,
       slippageBps: maxSlippageBps,
       onlyDirectRoutes: false,
       asLegacyTransaction: false,

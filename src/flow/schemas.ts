@@ -98,6 +98,27 @@ export const FlowDryRunHttpEnvelopeSchema = z
     path: ["signal"],
   });
 
+export const FlowExitSignalSchema = z.object({
+  schema_version: z.literal("flow_exit_signal_v1").default("flow_exit_signal_v1"),
+  position_id: z.string().uuid(),
+  token_mint: solanaAddress,
+  policy_label: z.string().min(1),
+  trigger_reason: z.string().min(1),
+  price_at_trigger_usd: z.number().positive().optional(),
+  size_sol: z.number().positive().optional(),
+  token_amount_raw: z.string().regex(/^\d+$/).optional(),
+  token_decimals: z.number().int().min(0).max(18).optional(),
+  run_id: z.string().nullable().optional(),
+  signal_id: z.string().nullable().optional(),
+  detected_at: z.string().datetime().optional(),
+});
+
+export const FlowExitHttpEnvelopeSchema = z.object({
+  schema_version: z.literal("flow_exit_v1").default("flow_exit_v1"),
+  signal: FlowExitSignalSchema.optional(),
+  poll_exit_pending: z.boolean().optional(),
+});
+
 export const FlowRiskConfigSchema = z.object({
   intended_size_sol: z.number().positive().default(0.01),
   max_position_size_sol: z.number().positive().default(0.02),
@@ -145,6 +166,8 @@ export const ExecutionJournalSchema = z.object({
 
 export type FlowSignalArtifact = z.infer<typeof FlowSignalArtifactSchema>;
 export type FlowDryRunHttpEnvelope = z.infer<typeof FlowDryRunHttpEnvelopeSchema>;
+export type FlowExitSignal = z.infer<typeof FlowExitSignalSchema>;
+export type FlowExitHttpEnvelope = z.infer<typeof FlowExitHttpEnvelopeSchema>;
 export type FlowRiskConfig = z.infer<typeof FlowRiskConfigSchema>;
 export type RiskCheckResult = z.infer<typeof RiskCheckResultSchema>;
 export type ExecutionJournal = z.infer<typeof ExecutionJournalSchema>;

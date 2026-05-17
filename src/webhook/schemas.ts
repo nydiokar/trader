@@ -11,6 +11,10 @@ export const SignalPayload = z.object({
   amount_sol: z.number().positive().max(10),
   max_slippage_bps: z.number().int().min(10).max(5000),
   client_timestamp: z.number().int(),
+  run_id: z.string().optional().nullable(),
+  entry_price_usd: z.number().positive().optional(),
+  entry_liquidity_usd: z.number().nonnegative().optional().nullable(),
+  planned_exit_policy_label: z.string().min(1).optional(),
 });
 
 export type SignalPayloadType = z.infer<typeof SignalPayload>;

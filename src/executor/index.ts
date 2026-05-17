@@ -38,7 +38,7 @@ import {
   JitoSyncError,
   type JitoClient,
 } from "./jito.js";
-import { getQuote, getSwapInstructions } from "./jupiter.js";
+import { getQuote, getQuoteForSwap, getSwapInstructions, WSOL_MINT } from "./jupiter.js";
 import { getPriorityFeeEstimate } from "./priority_fee.js";
 import {
   notify,
@@ -161,6 +161,7 @@ type ReconciliationResult =
       ok: true;
       amountOutActual: number;
       amountOutRaw: bigint;
+      tokenDecimals: number;
       slippageActual?: number;
       warning?: string;
     }
@@ -168,6 +169,14 @@ type ReconciliationResult =
       ok: false;
       errorMsg: string;
     };
+
+type PositionFeedbackInput = {
+  runId?: string | null;
+  signalId?: string | null;
+  entryPriceUsd: number;
+  entryLiquidityUsd?: number | null;
+  policyLabel: string;
+};
 
 function defaultDependencies(): Promise<ExecutorDependencies> {
   return Promise.resolve({
@@ -199,6 +208,7 @@ export async function executeSignal(
   tokenMint: string,
   amountSol: number,
   maxSlippageBps: number,
+  positionFeedback?: PositionFeedbackInput,
 ): Promise<{
   state: "done" | "failed";
   decision: string;
@@ -210,9 +220,155 @@ export async function executeSignal(
       tokenMint,
       amountSol,
       maxSlippageBps,
+      positionFeedback,
     },
     await defaultDependencies(),
   );
+}
+
+export async function executeTokenSell(input: {
+  exitId: string;
+  tokenMint: string;
+  tokenAmountRaw: string;
+  maxSlippageBps: number;
+}): Promise<{
+  state: "done" | "failed";
+  decision: string;
+  response: {
+    status?: string;
+    error?: string;
+    exit_id: string;
+    signature?: string;
+    submitted_via?: "jito" | "rpc";
+    dry_run?: boolean;
+  };
+}> {
+  return executeTokenSellWithDependencies(input, await defaultDependencies());
+}
+
+export async function executeTokenSellWithDependencies(
+  input: {
+    exitId: string;
+    tokenMint: string;
+    tokenAmountRaw: string;
+    maxSlippageBps: number;
+  },
+  deps: ExecutorDependencies,
+): Promise<{
+  state: "done" | "failed";
+  decision: string;
+  response: {
+    status?: string;
+    error?: string;
+    exit_id: string;
+    signature?: string;
+    submitted_via?: "jito" | "rpc";
+    dry_run?: boolean;
+  };
+}> {
+  assertExecutorPathNotReachableFromFlowDryRun("executor_trading");
+  executorPathReachability.inc({ path: "executor_trading" });
+
+  let signature: Signature | undefined;
+  let submissionAttempted = false;
+
+  try {
+    const quote = await getQuoteForSwap(
+      input.tokenMint,
+      WSOL_MINT,
+      input.tokenAmountRaw,
+      input.maxSlippageBps,
+    );
+    const swapInstructions = await deps.quoteClient.getSwapInstructions(
+      quote,
+      deps.wallet.address.toString(),
+    );
+    const builtTransaction = await buildSwapTransaction(
+      deps.connection,
+      deps.wallet,
+      swapInstructions,
+      deps.priorityFeeClient,
+    );
+    signature = getSignatureFromTransaction(builtTransaction.transaction);
+    const signedWireTransaction = getBase64EncodedWireTransaction(
+      builtTransaction.transaction,
+    );
+
+    if (deps.dryRun === true) {
+      return {
+        state: "done",
+        decision: "accepted",
+        response: {
+          status: "confirmed",
+          exit_id: input.exitId,
+          signature: `dry-run:${signature.toString()}`,
+          submitted_via: "rpc",
+          dry_run: true,
+        },
+      };
+    }
+
+    const submittedVia = await submitBuiltTransaction({
+      deps,
+      builtTransaction,
+      signedWireTransaction,
+      submissionState: {
+        markAttempted: () => {
+          submissionAttempted = true;
+        },
+      },
+    });
+
+    const outcome = await pollForConfirmation(
+      deps.connection,
+      signature,
+      builtTransaction.lastValidBlockHeight,
+      deps.sleep,
+      deps.now,
+    );
+
+    if (outcome === "confirmed") {
+      return {
+        state: "done",
+        decision: "accepted",
+        response: {
+          status: "confirmed",
+          exit_id: input.exitId,
+          signature: signature.toString(),
+          submitted_via: submittedVia,
+        },
+      };
+    }
+
+    return {
+      state: "failed",
+      decision: outcome,
+      response: {
+        error: outcome,
+        exit_id: input.exitId,
+        signature: signature.toString(),
+        submitted_via: submittedVia,
+      },
+    };
+  } catch (error) {
+    const outcome: Extract<ExecutionOutcome, "pre_submit_failed" | "uncertain"> =
+      signature && submissionAttempted ? "uncertain" : "pre_submit_failed";
+    logger.error(
+      { err: error, exit_id: input.exitId, signature: signature?.toString() },
+      submissionAttempted
+        ? "exit sell failed after submission"
+        : "exit sell failed before submission",
+    );
+    return {
+      state: "failed",
+      decision: outcome,
+      response: {
+        error: outcome,
+        exit_id: input.exitId,
+        ...(submissionAttempted && signature ? { signature: signature.toString() } : {}),
+      },
+    };
+  }
 }
 
 export async function executeSignalWithDependencies(
@@ -221,6 +377,7 @@ export async function executeSignalWithDependencies(
     tokenMint: string;
     amountSol: number;
     maxSlippageBps: number;
+    positionFeedback?: PositionFeedbackInput;
   },
   deps: ExecutorDependencies,
 ): Promise<{
@@ -360,6 +517,7 @@ export async function executeSignalWithDependencies(
     }
 
       const latencySeconds = Math.round(signalToConfirmSec);
+      await registerOpenPositionAfterBuy(input, reconciliation);
       await safeNotify(
         deps.notify,
         formatTradeConfirmed({
@@ -436,6 +594,57 @@ export async function executeSignalWithDependencies(
       },
     };
   }
+}
+
+async function registerOpenPositionAfterBuy(input: {
+  signalId: string;
+  tokenMint: string;
+  amountSol: number;
+  positionFeedback?: PositionFeedbackInput;
+}, reconciliation?: ReconciliationResult): Promise<void> {
+  if (!config.TOKENS_INGEST_BASE_URL || !input.positionFeedback) return;
+  if (!reconciliation?.ok) return;
+
+  try {
+    const response = await fetch(new URL("/positions/open", config.TOKENS_INGEST_BASE_URL), {
+      method: "POST",
+      headers: tokensIngestHeaders({ "content-type": "application/json" }),
+      body: JSON.stringify({
+        token_address: input.tokenMint,
+        run_id: input.positionFeedback.runId ?? null,
+        signal_id: input.positionFeedback.signalId ?? input.signalId,
+        entry_price_usd: input.positionFeedback.entryPriceUsd,
+        entry_liquidity_usd: input.positionFeedback.entryLiquidityUsd ?? null,
+        size_sol: input.amountSol,
+        token_amount_raw: reconciliation.amountOutRaw.toString(),
+        token_decimals: reconciliation.tokenDecimals,
+        policy_label: input.positionFeedback.policyLabel,
+      }),
+    });
+
+    if (!response.ok && response.status !== 409) {
+      logger.warn(
+        {
+          signal_id: input.signalId,
+          token_mint: input.tokenMint,
+          status: response.status,
+          body: await response.text(),
+        },
+        "position open feedback failed",
+      );
+    }
+  } catch (error) {
+    logger.warn(
+      { err: error, signal_id: input.signalId, token_mint: input.tokenMint },
+      "position open feedback failed",
+    );
+  }
+}
+
+function tokensIngestHeaders(base: Record<string, string> = {}): Record<string, string> {
+  return config.TOKENS_INGEST_SERVICE_SECRET
+    ? { ...base, "x-service-secret": config.TOKENS_INGEST_SERVICE_SECRET }
+    : base;
 }
 
 async function defaultSloQuery(windowStartSeconds: number): Promise<SloQueryResult> {
@@ -923,7 +1132,7 @@ async function reconcileConfirmedTrade(
 
   const slippageActual = reconcileSolSpent(transaction, wallet, input.signalId, signature.toString());
 
-  return { ok: true, amountOutActual, amountOutRaw, slippageActual, warning };
+  return { ok: true, amountOutActual, amountOutRaw, tokenDecimals: decimals, slippageActual, warning };
 }
 
 function reconcileSolSpent(

@@ -31,6 +31,11 @@ import {
 } from "../flow/execution-journal-db.js";
 import { runWithFlowDryRunExecutionBoundary } from "../flow/execution-boundary.js";
 import type { ExecutionJournal, FlowRiskConfig, FlowSignalArtifact } from "../flow/schemas.js";
+import {
+  extractFlowExitSignals,
+  fetchExitPendingSignals,
+  handleFlowExitSignal,
+} from "../flow/exit.js";
 import { runBlockers, runTripwires } from "../risk/index.js";
 import { getSolanaRpc, getTradingSigner } from "../solana/runtime.js";
 import { verifyFlowDryRunHmac, verifyHmac } from "./auth.js";
@@ -47,6 +52,10 @@ type SignalProcessor = (payload: {
   token_mint: string;
   amount_sol: number;
   max_slippage_bps: number;
+  run_id?: string | null;
+  entry_price_usd?: number;
+  entry_liquidity_usd?: number | null;
+  planned_exit_policy_label?: string;
 }) => Promise<{
   state: "done" | "failed" | "rejected";
   decision: string;
@@ -92,6 +101,15 @@ export async function registerRoutes(
         payload.token_mint,
         payload.amount_sol,
         payload.max_slippage_bps,
+        payload.entry_price_usd && payload.planned_exit_policy_label
+          ? {
+              runId: payload.run_id ?? null,
+              signalId: payload.signal_id,
+              entryPriceUsd: payload.entry_price_usd,
+              entryLiquidityUsd: payload.entry_liquidity_usd ?? null,
+              policyLabel: payload.planned_exit_policy_label,
+            }
+          : undefined,
       ));
   const healthCheck = options?.healthCheck ?? checkSolanaHealth;
   const blockerCheck = options?.blockerCheck ?? runBlockers;
@@ -569,6 +587,44 @@ export async function registerRoutes(
       return reply.code(500).send(response);
     }
     });
+  });
+
+  app.post("/flow/exit", async (request, reply) => {
+    await verifyFlowDryRunHmac(request, reply);
+    if (reply.sent) return;
+
+    try {
+      const extracted = extractFlowExitSignals(request.body);
+      const signals =
+        extracted.source === "poll" ? await fetchExitPendingSignals() : extracted.signals;
+      const results = [];
+      for (const signal of signals) {
+        results.push(await handleFlowExitSignal(signal));
+      }
+
+      return reply.code(200).send({
+        schema_version: "flow_exit_v1",
+        status: "processed",
+        source: extracted.source,
+        count: results.length,
+        dry_run: config.DRY_RUN,
+        results,
+      });
+    } catch (error) {
+      logger.error({ err: error }, "flow exit processing failed");
+      const reason = error instanceof Error ? error.message : String(error);
+      const statusCode =
+        reason === "invalid flow exit payload"
+          ? 400
+          : reason.includes("TOKENS_INGEST_BASE_URL") || reason.includes("exit_pending fetch failed")
+            ? 503
+            : 500;
+      return reply.code(statusCode).send({
+        error: "flow exit processing failed",
+        reason,
+        dry_run: config.DRY_RUN,
+      });
+    }
   });
 }
 

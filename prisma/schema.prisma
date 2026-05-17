@@ -118,6 +118,37 @@ model FlowDryRunAttempt {
   @@map("flow_dry_run_attempt")
 }
 
+// Durable journal for ES exit/sell handling. Dry-run rows are the ES-4 validation
+// path; live rows record the sell outcome and tokens_ingest close callback status.
+model FlowExitExecution {
+  id                    String    @id @default(uuid())
+  positionId            String    @unique @map("position_id")
+  tokenMint             String    @map("token_mint")
+  policyLabel           String    @map("policy_label")
+  triggerReason         String    @map("trigger_reason")
+  priceAtTriggerUsd     Float?    @map("price_at_trigger_usd")
+  sizeSol               Float?    @map("size_sol")
+  tokenAmountRaw        String?   @map("token_amount_raw")
+  tokenDecimals         Int?      @map("token_decimals")
+  rawSignalJson         String    @map("raw_signal_json")
+  state                 String
+  dryRun                Boolean   @default(false) @map("dry_run")
+  signature             String?
+  submittedVia          String?   @map("submitted_via")
+  closeReason           String?   @map("close_reason")
+  closeCallbackStatus   String?   @map("close_callback_status")
+  closeCallbackResponse String?   @map("close_callback_response")
+  errorReason           String?   @map("error_reason")
+  errorMessage          String?   @map("error_message")
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @updatedAt @map("updated_at")
+  completedAt           DateTime? @map("completed_at")
+
+  @@index([state], name: "idx_flow_exit_execution_state")
+  @@index([tokenMint], name: "idx_flow_exit_execution_token_mint")
+  @@map("flow_exit_execution")
+}
+
 // Spec §4.1 — per-token blocklist
 model Blocklist {
   tokenMint String @id @map("token_mint")
