@@ -8,9 +8,15 @@ type TestJupiterInstruction = {
 };
 
 const upsertTrade = vi.fn();
+const findSignal = vi.fn();
+const createSignal = vi.fn();
 
 vi.mock("../src/db/index.js", () => ({
   db: {
+    signal: {
+      findUnique: findSignal,
+      create: createSignal,
+    },
     trade: {
       upsert: upsertTrade,
     },
@@ -87,6 +93,7 @@ function makeSwapInstructionsBase() {
 describe("M3 executor", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    findSignal.mockResolvedValue({ signalId: "existing-signal" });
     process.env["WALLET_PRIVATE_KEY_BASE58"] = "A".repeat(88);
     process.env["HELIUS_RPC_URL"] = "https://mainnet.helius-rpc.com/?api-key=test";
     process.env["WEBHOOK_SECRET"] = "a".repeat(32);
@@ -167,6 +174,63 @@ describe("M3 executor", () => {
         submitted_via: "rpc",
         amount_out_actual: 12.345,
       },
+    });
+  });
+
+  it("creates a parent signal row when invoked directly without webhook intake", async () => {
+    findSignal.mockResolvedValueOnce(null);
+    const { executeSignalWithDependencies } = await import("../src/executor/index.js");
+    const wallet = await generateKeyPairSigner();
+    const tokenMint = "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN";
+
+    await executeSignalWithDependencies(
+      {
+        signalId: "10101010-1010-4101-8101-101010101010",
+        tokenMint,
+        amountSol: 0.01,
+        maxSlippageBps: 300,
+      },
+      {
+        wallet,
+        now: vi.fn().mockReturnValue(1_000),
+        sleep: vi.fn().mockResolvedValue(undefined),
+        quoteClient: {
+          getQuote: vi.fn().mockResolvedValue(makeQuote()),
+          getSwapInstructions: vi.fn().mockResolvedValue(makeSwapInstructions()),
+        },
+        priorityFeeClient: {
+          getPriorityFeeEstimate: vi.fn().mockResolvedValue(12_345n),
+        },
+        connection: {
+          getLatestBlockhash: vi.fn().mockResolvedValue({
+            blockhash: "11111111111111111111111111111111",
+            lastValidBlockHeight: 55,
+          }),
+          fetchLookupTableAddresses: vi.fn().mockResolvedValue({}),
+          simulateTransaction: vi
+            .fn()
+            .mockResolvedValue({ err: null, unitsConsumed: 100_000n }),
+          sendTransaction: vi.fn().mockResolvedValue("sig-confirmed"),
+          getSignatureStatuses: vi.fn().mockResolvedValue([
+            {
+              confirmationStatus: "confirmed",
+              err: null,
+            },
+          ]),
+          getBlockHeight: vi.fn().mockResolvedValue(50),
+          getTransaction: vi
+            .fn()
+            .mockResolvedValue(makeConfirmedTransaction(wallet.address.toString(), tokenMint)),
+        },
+      },
+    );
+
+    expect(createSignal).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        signalId: "10101010-1010-4101-8101-101010101010",
+        state: "in_flight",
+        rawPayload: expect.stringContaining("executor_direct"),
+      }),
     });
   });
 
@@ -987,6 +1051,84 @@ describe("M3 executor", () => {
     );
   });
 
+  it("submits through Helius Sender with an in-transaction tip", async () => {
+    const { executeSignalWithDependencies } = await import("../src/executor/index.js");
+    const wallet = await generateKeyPairSigner();
+    const tipAccount = (await generateKeyPairSigner()).address;
+    const tokenMint = "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN";
+    const sendTransaction = vi.fn();
+    const sendViaSender = vi.fn().mockResolvedValue("sig-helius-sender");
+
+    const result = await executeSignalWithDependencies(
+      {
+        signalId: "19191919-1919-4191-8191-191919191919",
+        tokenMint,
+        amountSol: 0.01,
+        maxSlippageBps: 300,
+      },
+      {
+        wallet,
+        now: vi.fn().mockReturnValue(1_000),
+        sleep: vi.fn().mockResolvedValue(undefined),
+        quoteClient: {
+          getQuote: vi.fn().mockResolvedValue(makeQuote()),
+          getSwapInstructions: vi.fn().mockResolvedValue(makeSwapInstructions()),
+        },
+        priorityFeeClient: {
+          getPriorityFeeEstimate: vi.fn().mockResolvedValue(12_345n),
+        },
+        heliusSenderClient: {
+          getTipAccount: vi.fn().mockReturnValue(tipAccount),
+          sendTransaction: sendViaSender,
+        },
+        submissionMode: "helius_sender",
+        heliusSenderTipLamports: 200_000n,
+        connection: {
+          getLatestBlockhash: vi.fn().mockResolvedValue({
+            blockhash: "11111111111111111111111111111111",
+            lastValidBlockHeight: 55,
+          }),
+          fetchLookupTableAddresses: vi.fn().mockResolvedValue({}),
+          simulateTransaction: vi
+            .fn()
+            .mockResolvedValue({ err: null, unitsConsumed: 100_000n }),
+          sendTransaction,
+          getSignatureStatuses: vi.fn().mockResolvedValue([
+            {
+              confirmationStatus: "confirmed",
+              err: null,
+            },
+          ]),
+          getBlockHeight: vi.fn().mockResolvedValue(50),
+          getTransaction: vi
+            .fn()
+            .mockResolvedValue(makeConfirmedTransaction(wallet.address.toString(), tokenMint)),
+        },
+      },
+    );
+
+    expect(sendViaSender).toHaveBeenCalledOnce();
+    expect(sendViaSender).toHaveBeenCalledWith(expect.any(String), {
+      skipPreflight: true,
+      maxRetries: 0,
+    });
+    expect(sendTransaction).not.toHaveBeenCalled();
+    expect(upsertTrade).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({
+          state: "confirmed",
+          submittedVia: "helius_sender",
+        }),
+      }),
+    );
+    expect(result).toEqual(
+      expect.objectContaining({
+        state: "done",
+        response: expect.objectContaining({ submitted_via: "helius_sender" }),
+      }),
+    );
+  });
+
   it("falls back to RPC only when Jito fails before acceptance", async () => {
     const { executeSignalWithDependencies } = await import("../src/executor/index.js");
     const { JitoSyncError } = await import("../src/executor/jito.js");
@@ -1229,6 +1371,59 @@ describe("M3 executor", () => {
     );
 
     // pre=20e9 post=19_989_995_000 fee=5000 → delta=10_000_000 lamports = 0.01 SOL
+    expect(upsertTrade).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({
+          state: "confirmed",
+          slippageActual: 0.01,
+        }),
+      }),
+    );
+  });
+
+  it("persists slippageActual when RPC returns BigInt pre/post balances", async () => {
+    const { executeSignalWithDependencies } = await import("../src/executor/index.js");
+    const wallet = await generateKeyPairSigner();
+    const tokenMint = "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN";
+    const walletAddr = wallet.address.toString();
+
+    await executeSignalWithDependencies(
+      {
+        signalId: "d4d4d4d4-d4d4-4d4d-8d4d-d4d4d4d4d4d4",
+        tokenMint,
+        amountSol: 0.01,
+        maxSlippageBps: 300,
+      },
+      {
+        wallet,
+        now: vi.fn().mockReturnValue(1_000),
+        sleep: vi.fn().mockResolvedValue(undefined),
+        quoteClient: {
+          getQuote: vi.fn().mockResolvedValue(makeQuote()),
+          getSwapInstructions: vi.fn().mockResolvedValue(makeSwapInstructions()),
+        },
+        priorityFeeClient: { getPriorityFeeEstimate: vi.fn().mockResolvedValue(12_345n) },
+        connection: {
+          getLatestBlockhash: vi.fn().mockResolvedValue({ blockhash: "11111111111111111111111111111111", lastValidBlockHeight: 55 }),
+          fetchLookupTableAddresses: vi.fn().mockResolvedValue({}),
+          simulateTransaction: vi.fn().mockResolvedValue({ err: null, unitsConsumed: 100_000n }),
+          sendTransaction: vi.fn().mockResolvedValue("sig-bigint-sol-recon"),
+          getSignatureStatuses: vi.fn().mockResolvedValue([{ confirmationStatus: "confirmed", err: null }]),
+          getBlockHeight: vi.fn().mockResolvedValue(50),
+          getTransaction: vi.fn().mockResolvedValue({
+            transaction: { message: { accountKeys: [{ pubkey: walletAddr }] } },
+            meta: {
+              preTokenBalances: [{ owner: walletAddr, mint: tokenMint, uiTokenAmount: { amount: "0", decimals: 6, uiAmount: 0 } }],
+              postTokenBalances: [{ owner: walletAddr, mint: tokenMint, uiTokenAmount: { amount: "12345000", decimals: 6, uiAmount: 12.345 } }],
+              preBalances: [20_000_000_000n],
+              postBalances: [19_989_995_000n],
+              fee: 5_000n,
+            },
+          }),
+        },
+      },
+    );
+
     expect(upsertTrade).toHaveBeenCalledWith(
       expect.objectContaining({
         create: expect.objectContaining({

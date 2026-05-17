@@ -8,7 +8,7 @@ const usdcMint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 
 describe.skipIf(!runLive)("M4 mainnet micro-trade validation", () => {
   it(
-    "runs guarded tiny RPC-only mainnet swaps and reports acceptance evidence",
+    "runs guarded tiny mainnet swaps and reports acceptance evidence",
     async () => {
       if (confirmation !== expectedConfirmation) {
         throw new Error(
@@ -37,6 +37,10 @@ describe.skipIf(!runLive)("M4 mainnet micro-trade validation", () => {
       }
 
       const walletFloorSol = Number(process.env["MAINNET_MICRO_TRADE_WALLET_FLOOR_SOL"] ?? "0.05");
+      const feeBufferSol = Number(process.env["MAINNET_MICRO_TRADE_FEE_BUFFER_SOL"] ?? "0.003");
+      if (!Number.isFinite(feeBufferSol) || feeBufferSol < 0.001) {
+        throw new Error("MAINNET_MICRO_TRADE_FEE_BUFFER_SOL must be at least 0.001");
+      }
       const { getSolanaRpc, getTradingSigner } = await import("../src/solana/runtime.js");
       const rpc = getSolanaRpc();
       const signer = await getTradingSigner();
@@ -44,8 +48,11 @@ describe.skipIf(!runLive)("M4 mainnet micro-trade validation", () => {
         .getBalance(signer.address, { commitment: "confirmed" })
         .send();
       const walletSol = Number(balance.value) / 1_000_000_000;
-      if (walletSol - amountSol * iterations < walletFloorSol) {
-        throw new Error("wallet SOL balance would cross mainnet micro-trade floor");
+      const estimatedMaxSolSpent = (amountSol + feeBufferSol) * iterations;
+      if (walletSol - estimatedMaxSolSpent < walletFloorSol) {
+        throw new Error(
+          "wallet SOL balance would cross mainnet micro-trade floor including fee/tip buffer",
+        );
       }
 
       const { executeSignal } = await import("../src/executor/index.js");
@@ -94,6 +101,8 @@ describe.skipIf(!runLive)("M4 mainnet micro-trade validation", () => {
           landingRate,
           elapsedSeconds,
           amountSol,
+          feeBufferSol,
+          estimatedMaxSolSpent,
           tokenMint,
           results,
         }),

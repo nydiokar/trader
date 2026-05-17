@@ -32,12 +32,17 @@ import {
 import { getSolanaRpc, getTradingSigner } from "../solana/runtime.js";
 import { assertExecutorPathNotReachableFromFlowDryRun } from "../flow/execution-boundary.js";
 import {
-  base64WireTransactionToBase58,
   createJitoClient,
   createJitoTipTransaction,
   JitoSyncError,
   type JitoClient,
 } from "./jito.js";
+import {
+  createHeliusSenderClient,
+  createHeliusSenderTipInstruction,
+  HeliusSenderSyncError,
+  type HeliusSenderClient,
+} from "./helius-sender.js";
 import { getQuote, getQuoteForSwap, getSwapInstructions, WSOL_MINT } from "./jupiter.js";
 import { getPriorityFeeEstimate } from "./priority_fee.js";
 import {
@@ -59,6 +64,15 @@ type ExecutionOutcome =
   | "expired"
   | "uncertain"
   | "pre_submit_failed";
+
+type SubmissionPath = "helius_sender" | "jito" | "rpc";
+type SubmissionMode = "helius_sender" | "jito" | "rpc";
+
+type TransactionInstruction = {
+  programAddress: Address;
+  accounts: Array<{ address: Address; role: AccountRole }>;
+  data: Uint8Array;
+};
 
 type QuoteClient = {
   getQuote(tokenMint: string, amountSol: number, maxSlippageBps: number): Promise<QuoteResponse>;
@@ -110,7 +124,11 @@ type ExecutorDependencies = {
   wallet: Awaited<ReturnType<typeof getTradingSigner>>;
   quoteClient: QuoteClient;
   priorityFeeClient: PriorityFeeClient;
+  heliusSenderClient?: HeliusSenderClient;
   jitoClient?: JitoClient;
+  submissionMode?: SubmissionMode;
+  submissionFallbackRpc?: boolean;
+  heliusSenderTipLamports?: bigint;
   jitoTipLamports?: bigint;
   dryRun?: boolean;
   notify?: NotifyFn;
@@ -123,7 +141,7 @@ type ExecutorDependencies = {
 type PersistedTrade = {
   signature: string | null;
   state: ExecutionOutcome;
-  submittedVia: "jito" | "rpc";
+  submittedVia: SubmissionPath;
   errorMsg?: string;
   amountOutActual?: number;
   slippageActual?: number;
@@ -140,9 +158,9 @@ type ConfirmedTransactionDetails = {
   meta?: {
     preTokenBalances?: TokenBalance[];
     postTokenBalances?: TokenBalance[];
-    preBalances?: number[];
-    postBalances?: number[];
-    fee?: number;
+    preBalances?: Array<number | bigint>;
+    postBalances?: Array<number | bigint>;
+    fee?: number | bigint;
   } | null;
 };
 
@@ -189,7 +207,14 @@ function defaultDependencies(): Promise<ExecutorDependencies> {
       getPriorityFeeEstimate: (serializedTransaction?: string) =>
         getPriorityFeeEstimate({ serializedTransaction }),
     },
-    jitoClient: createJitoClient(),
+    heliusSenderClient:
+      config.SUBMISSION_MODE === "helius_sender"
+        ? createHeliusSenderClient()
+        : undefined,
+    jitoClient: config.SUBMISSION_MODE === "jito" ? createJitoClient() : undefined,
+    submissionMode: config.SUBMISSION_MODE,
+    submissionFallbackRpc: config.SUBMISSION_FALLBACK_RPC,
+    heliusSenderTipLamports: BigInt(config.HELIUS_SENDER_TIP_LAMPORTS),
     jitoTipLamports: BigInt(config.JITO_TIP_LAMPORTS),
     dryRun: config.DRY_RUN,
     notify,
@@ -239,7 +264,7 @@ export async function executeTokenSell(input: {
     error?: string;
     exit_id: string;
     signature?: string;
-    submitted_via?: "jito" | "rpc";
+    submitted_via?: SubmissionPath;
     dry_run?: boolean;
   };
 }> {
@@ -262,7 +287,7 @@ export async function executeTokenSellWithDependencies(
     error?: string;
     exit_id: string;
     signature?: string;
-    submitted_via?: "jito" | "rpc";
+    submitted_via?: SubmissionPath;
     dry_run?: boolean;
   };
 }> {
@@ -283,11 +308,13 @@ export async function executeTokenSellWithDependencies(
       quote,
       deps.wallet.address.toString(),
     );
+    const additionalInstructions = await buildAdditionalSubmissionInstructions(deps);
     const builtTransaction = await buildSwapTransaction(
       deps.connection,
       deps.wallet,
       swapInstructions,
       deps.priorityFeeClient,
+      additionalInstructions,
     );
     signature = getSignatureFromTransaction(builtTransaction.transaction);
     const signedWireTransaction = getBase64EncodedWireTransaction(
@@ -295,6 +322,7 @@ export async function executeTokenSellWithDependencies(
     );
 
     if (deps.dryRun === true) {
+      const submittedVia = resolveSubmissionMode(deps);
       return {
         state: "done",
         decision: "accepted",
@@ -302,7 +330,7 @@ export async function executeTokenSellWithDependencies(
           status: "confirmed",
           exit_id: input.exitId,
           signature: `dry-run:${signature.toString()}`,
-          submitted_via: "rpc",
+          submitted_via: submittedVia,
           dry_run: true,
         },
       };
@@ -392,6 +420,7 @@ export async function executeSignalWithDependencies(
 
   let signature: Signature | undefined;
   let submissionAttempted = false;
+  let submittedVia: SubmissionPath | undefined;
 
   try {
     const quote = await deps.quoteClient.getQuote(
@@ -404,12 +433,14 @@ export async function executeSignalWithDependencies(
       quote,
       deps.wallet.address.toString(),
     );
+    const additionalInstructions = await buildAdditionalSubmissionInstructions(deps);
 
     const builtTransaction = await buildSwapTransaction(
       deps.connection,
       deps.wallet,
       swapInstructions,
       deps.priorityFeeClient,
+      additionalInstructions,
     );
 
     signature = getSignatureFromTransaction(builtTransaction.transaction);
@@ -419,6 +450,7 @@ export async function executeSignalWithDependencies(
 
     if (deps.dryRun === true) {
       const syntheticSignature = `dry-run:${signature.toString()}`;
+      const submittedVia = resolveSubmissionMode(deps);
       logger.info(
         {
           signal_id: input.signalId,
@@ -431,7 +463,7 @@ export async function executeSignalWithDependencies(
       await writeTrade(input, createdAt, deps.now(), {
         signature: syntheticSignature,
         state: "confirmed",
-        submittedVia: "rpc",
+        submittedVia,
         dryRun: true,
       });
       stopTimer();
@@ -443,13 +475,13 @@ export async function executeSignalWithDependencies(
           status: "confirmed",
           signal_id: input.signalId,
           signature: syntheticSignature,
-          submitted_via: "rpc",
+          submitted_via: submittedVia,
           dry_run: true,
         },
       };
     }
 
-    const submittedVia = await submitBuiltTransaction({
+    submittedVia = await submitBuiltTransaction({
       deps,
       builtTransaction,
       signedWireTransaction,
@@ -575,7 +607,7 @@ export async function executeSignalWithDependencies(
     await writeTrade(input, createdAt, deps.now(), {
       signature: submissionAttempted ? signature?.toString() ?? null : null,
       state: outcome,
-      submittedVia: "rpc",
+      submittedVia: submittedVia ?? resolveSubmissionMode(deps),
       errorMsg: error instanceof Error ? error.message : "unknown executor error",
     });
 
@@ -591,6 +623,7 @@ export async function executeSignalWithDependencies(
         error: outcome,
         signal_id: input.signalId,
         ...(submissionAttempted && signature ? { signature: signature.toString() } : {}),
+        ...(submissionAttempted && submittedVia ? { submitted_via: submittedVia } : {}),
       },
     };
   }
@@ -664,6 +697,26 @@ async function defaultSloQuery(windowStartSeconds: number): Promise<SloQueryResu
     .filter((v): v is number => v !== null && v !== undefined);
 
   return { submitted, confirmed, submitToConfirmValues };
+}
+
+async function buildAdditionalSubmissionInstructions(
+  deps: ExecutorDependencies,
+): Promise<TransactionInstruction[]> {
+  if (resolveSubmissionMode(deps) !== "helius_sender") {
+    return [];
+  }
+
+  if (!deps.heliusSenderClient) {
+    throw new Error("helius_sender submission mode requires heliusSenderClient");
+  }
+
+  return [
+    createHeliusSenderTipInstruction({
+      source: address(deps.wallet.address),
+      tipAccount: deps.heliusSenderClient.getTipAccount(),
+      tipLamports: deps.heliusSenderTipLamports ?? BigInt(config.HELIUS_SENDER_TIP_LAMPORTS),
+    }),
+  ];
 }
 
 async function runSloCheck(
@@ -780,6 +833,7 @@ async function buildSwapTransaction(
   wallet: Awaited<ReturnType<typeof getTradingSigner>>,
   swapInstructions: SwapInstructionsResponse,
   priorityFeeClient: PriorityFeeClient,
+  additionalInstructions: TransactionInstruction[] = [],
 ): Promise<{
   transaction: Awaited<ReturnType<typeof signTransactionMessageWithSigners>>;
   lastValidBlockHeight: number;
@@ -803,6 +857,7 @@ async function buildSwapTransaction(
       addressesByLookupTableAddress,
       computeUnitLimit: FIXED_COMPUTE_UNIT_LIMIT,
       priorityFeeMicroLamports: 0n,
+      additionalInstructions,
     }),
   );
 
@@ -827,6 +882,7 @@ async function buildSwapTransaction(
     addressesByLookupTableAddress,
     computeUnitLimit: computedUnitLimit,
     priorityFeeMicroLamports,
+    additionalInstructions,
   });
 
   return {
@@ -844,8 +900,44 @@ async function submitBuiltTransaction(input: {
   builtTransaction: Awaited<ReturnType<typeof buildSwapTransaction>>;
   signedWireTransaction: Base64EncodedWireTransaction;
   submissionState: { markAttempted(): void };
-}): Promise<"jito" | "rpc"> {
-  if (input.deps.jitoClient) {
+}): Promise<SubmissionPath> {
+  const mode = resolveSubmissionMode(input.deps);
+
+  if (mode === "helius_sender") {
+    if (!input.deps.heliusSenderClient) {
+      throw new Error("helius_sender submission mode requires heliusSenderClient");
+    }
+
+    try {
+      assertExecutorPathNotReachableFromFlowDryRun("transaction_submission");
+      executorPathReachability.inc({ path: "transaction_submission" });
+      await input.deps.heliusSenderClient.sendTransaction(input.signedWireTransaction, {
+        skipPreflight: true,
+        maxRetries: 0,
+      });
+      input.submissionState.markAttempted();
+      tradesSubmitted.inc({ path: "helius_sender" });
+      return "helius_sender";
+    } catch (error) {
+      if (!(error instanceof HeliusSenderSyncError)) {
+        throw error;
+      }
+      if (input.deps.submissionFallbackRpc === false) {
+        throw error;
+      }
+
+      logger.warn(
+        { err: error },
+        "Helius Sender sync error before acceptance, falling back to RPC",
+      );
+    }
+  }
+
+  if (mode === "jito") {
+    if (!input.deps.jitoClient) {
+      throw new Error("jito submission mode requires jitoClient");
+    }
+
     try {
       const tipTransaction = await createJitoTipTransaction({
         wallet: input.deps.wallet,
@@ -856,8 +948,8 @@ async function submitBuiltTransaction(input: {
       assertExecutorPathNotReachableFromFlowDryRun("transaction_submission");
       executorPathReachability.inc({ path: "transaction_submission" });
       const bundleId = await input.deps.jitoClient.submitBundle([
-        base64WireTransactionToBase58(tipTransaction.base64WireTransaction),
-        base64WireTransactionToBase58(input.signedWireTransaction),
+        tipTransaction.base64WireTransaction,
+        input.signedWireTransaction,
       ]);
       input.submissionState.markAttempted();
       logger.info(
@@ -873,11 +965,36 @@ async function submitBuiltTransaction(input: {
       if (!(error instanceof JitoSyncError)) {
         throw error;
       }
+      if (input.deps.submissionFallbackRpc === false) {
+        throw error;
+      }
 
       logger.warn({ err: error }, "jito sync error before acceptance, falling back to RPC");
     }
   }
 
+  await submitViaRpc(input);
+  return "rpc";
+}
+
+function resolveSubmissionMode(deps: ExecutorDependencies): SubmissionMode {
+  if (deps.submissionMode) {
+    return deps.submissionMode;
+  }
+  if (deps.jitoClient) {
+    return "jito";
+  }
+  if (deps.heliusSenderClient) {
+    return "helius_sender";
+  }
+  return "rpc";
+}
+
+async function submitViaRpc(input: {
+  deps: ExecutorDependencies;
+  signedWireTransaction: Base64EncodedWireTransaction;
+  submissionState: { markAttempted(): void };
+}): Promise<void> {
   input.submissionState.markAttempted();
   assertExecutorPathNotReachableFromFlowDryRun("transaction_submission");
   executorPathReachability.inc({ path: "transaction_submission" });
@@ -886,7 +1003,6 @@ async function submitBuiltTransaction(input: {
     maxRetries: 0,
   });
   tradesSubmitted.inc({ path: "rpc" });
-  return "rpc";
 }
 
 async function signSwapTransaction(
@@ -904,6 +1020,7 @@ function createSwapTransactionMessage(input: {
   addressesByLookupTableAddress: Record<Address, Address[]>;
   computeUnitLimit: number;
   priorityFeeMicroLamports: bigint;
+  additionalInstructions?: TransactionInstruction[];
 }) {
   return compressTransactionMessageUsingAddressLookupTables(
     pipe(
@@ -927,6 +1044,7 @@ function createSwapTransactionMessage(input: {
             ...decodeInstructionGroup(input.swapInstructions.setupInstructions),
             decodeInstruction(input.swapInstructions.swapInstruction),
             ...decodeOptionalInstruction(input.swapInstructions.cleanupInstruction),
+            ...(input.additionalInstructions ?? []),
           ],
           message,
         ),
@@ -1024,7 +1142,7 @@ async function pollForConfirmation(
 function toPersistedTrade(
   outcome: ExecutionOutcome,
   signature: Signature,
-  submittedVia: "jito" | "rpc",
+  submittedVia: SubmissionPath,
   submitToConfirmSeconds: number | undefined,
   reconciliation?: ReconciliationResult,
 ): PersistedTrade {
@@ -1166,8 +1284,29 @@ function reconcileSolSpent(
     return undefined;
   }
 
-  const deltaLamports = pre - post - (fee ?? 0);
-  return deltaLamports / 1_000_000_000;
+  const preLamports = toLamportsBigInt(pre);
+  const postLamports = toLamportsBigInt(post);
+  const feeLamports = fee === undefined ? 0n : toLamportsBigInt(fee);
+  if (preLamports === null || postLamports === null || feeLamports === null) {
+    logger.warn(
+      { signal_id: signalId, signature: signatureStr, walletIndex },
+      "sol reconciliation: pre/post/fee balances not parseable",
+    );
+    return undefined;
+  }
+
+  const deltaLamports = preLamports - postLamports - feeLamports;
+  return Number(deltaLamports) / 1_000_000_000;
+}
+
+function toLamportsBigInt(value: number | bigint): bigint | null {
+  if (typeof value === "bigint") {
+    return value;
+  }
+  if (!Number.isSafeInteger(value) || value < 0) {
+    return null;
+  }
+  return BigInt(value);
 }
 
 function findWalletTokenBalance(
@@ -1212,6 +1351,7 @@ async function writeTrade(
   nowMs: number,
   trade: PersistedTrade,
 ): Promise<void> {
+  await ensureSignalRow(input, createdAt);
   await db.trade.upsert({
     where: { signalId: input.signalId },
     update: {
@@ -1241,6 +1381,35 @@ async function writeTrade(
       createdAt,
       confirmedAt: trade.state === "confirmed" ? Math.floor(nowMs / 1000) : null,
       errorMsg: trade.errorMsg,
+    },
+  });
+}
+
+async function ensureSignalRow(
+  input: {
+    signalId: string;
+    tokenMint: string;
+    amountSol: number;
+  },
+  receivedAt: number,
+): Promise<void> {
+  const existing = await db.signal.findUnique({
+    where: { signalId: input.signalId },
+    select: { signalId: true },
+  });
+  if (existing) return;
+
+  await db.signal.create({
+    data: {
+      signalId: input.signalId,
+      receivedAt,
+      rawPayload: JSON.stringify({
+        source: "executor_direct",
+        signal_id: input.signalId,
+        token_mint: input.tokenMint,
+        amount_sol: input.amountSol,
+      }),
+      state: "in_flight",
     },
   });
 }

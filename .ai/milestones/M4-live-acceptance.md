@@ -9,6 +9,11 @@ Commit:
 
 - [ ] Real mainnet `HELIUS_RPC_URL` configured.
 - [ ] Real wallet configured through ignored env/private-key material.
+- [ ] Submission mode chosen explicitly:
+  - `SUBMISSION_MODE=helius_sender` for normal canary/live signal swaps with Sender tip included in the swap transaction.
+  - `SUBMISSION_MODE=rpc` for the cheapest basic plumbing check.
+  - `SUBMISSION_MODE=jito` only when direct bundle semantics are required.
+- [ ] Jupiter API key configured when using `https://api.jup.ag/*` endpoints.
 - [ ] Wallet funded for `100 * 0.001 SOL` plus fees while preserving `MAINNET_MICRO_TRADE_WALLET_FLOOR_SOL`.
 - [ ] `DRY_RUN=true` dry-run completed successfully before any real trade.
 - [ ] `DRY_RUN=false` only for the guarded live test.
@@ -16,6 +21,7 @@ Commit:
 - [ ] `MAINNET_MICRO_TRADE_AMOUNT_SOL=0.001`.
 - [ ] `MAINNET_MICRO_TRADE_MAX_SOL=0.001`.
 - [ ] `MAINNET_MICRO_TRADE_ITERATIONS=50`.
+- [ ] `MAINNET_MICRO_TRADE_FEE_BUFFER_SOL=0.003` or higher; wallet floor check includes this per-iteration buffer.
 - [ ] Target mint is USDC unless intentionally overridden.
 
 ## Commands
@@ -51,6 +57,9 @@ $env:MAINNET_MICRO_TRADE_AMOUNT_SOL="0.001"
 $env:MAINNET_MICRO_TRADE_MAX_SOL="0.001"
 $env:MAINNET_MICRO_TRADE_ITERATIONS="50"
 $env:MAINNET_MICRO_TRADE_WALLET_FLOOR_SOL="0.05"
+$env:MAINNET_MICRO_TRADE_FEE_BUFFER_SOL="0.003"
+$env:SUBMISSION_MODE="helius_sender"
+$env:HELIUS_SENDER_TIP_LAMPORTS="200000"
 pnpm test -- tests/executor.mainnet.live.test.ts
 ```
 

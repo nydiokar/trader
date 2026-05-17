@@ -18,6 +18,9 @@ describe("config defaults", () => {
     process.env["WALLET_SOL_FLOOR"] = "0.05";
     process.env["DEFAULT_SLIPPAGE_BPS"] = "300";
     process.env["WEBHOOK_PORT"] = "8089";
+    process.env["SUBMISSION_MODE"] = "rpc";
+    process.env["SUBMISSION_FALLBACK_RPC"] = "true";
+    process.env["HELIUS_SENDER_TIP_LAMPORTS"] = "200000";
   });
 
   it("defaults are correct values", async () => {
@@ -30,6 +33,9 @@ describe("config defaults", () => {
     expect(config.DRY_RUN).toBe(false);
     expect(config.KILL_SWITCH).toBe(false);
     expect(config.PRIORITY_FEE_LEVEL).toBe("High");
+    expect(config.SUBMISSION_MODE).toBe("rpc");
+    expect(config.SUBMISSION_FALLBACK_RPC).toBe(true);
+    expect(config.HELIUS_SENDER_TIP_LAMPORTS).toBe(200_000);
     expect(config.WEBHOOK_PORT).toBe(8089);
   });
 });

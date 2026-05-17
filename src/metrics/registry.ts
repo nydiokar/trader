@@ -90,7 +90,7 @@ for (const result of ["accepted", "rejected", "replay", "auth_failed"] as const)
   signalsReceived.labels(result).inc(0);
 }
 
-for (const path of ["rpc", "jito"] as const) {
+for (const path of ["rpc", "jito", "helius_sender"] as const) {
   tradesSubmitted.labels(path).inc(0);
 }
 

@@ -27,6 +27,12 @@ const ConfigSchema = z.object({
     .default("https://mainnet.block-engine.jito.wtf"),
   JITO_TIP_LAMPORTS: z.coerce.number().int().positive().default(100_000),
 
+  // Submission
+  SUBMISSION_MODE: z.enum(["rpc", "helius_sender", "jito"]).default("rpc"),
+  SUBMISSION_FALLBACK_RPC: booleanEnv("true"),
+  HELIUS_SENDER_URL: z.string().url().default("https://sender.helius-rpc.com/fast"),
+  HELIUS_SENDER_TIP_LAMPORTS: z.coerce.number().int().positive().default(200_000),
+
   // Webhook
   WEBHOOK_SECRET: z.string().min(32),
   WEBHOOK_PORT: z.coerce.number().int().positive().default(8089),
@@ -56,7 +62,7 @@ const ConfigSchema = z.object({
     .string()
     .default("info")
     .transform((v) => v.toLowerCase())
-    .pipe(z.enum(["fatal", "error", "warn", "info", "debug", "trace"])),
+    .pipe(z.enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"])),
   LOG_FILE: z.string().optional(),
 
   // Modes

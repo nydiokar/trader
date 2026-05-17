@@ -5,5 +5,8 @@ export default defineConfig({
     globals: false,
     environment: "node",
     include: ["src/**/*.test.ts", "tests/**/*.test.ts"],
+    env: {
+      LOG_LEVEL: "silent",
+    },
   },
 });

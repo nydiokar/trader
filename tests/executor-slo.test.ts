@@ -2,9 +2,15 @@ import { generateKeyPairSigner } from "@solana/kit";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const upsertTrade = vi.fn();
+const findSignal = vi.fn();
+const createSignal = vi.fn();
 
 vi.mock("../src/db/index.js", () => ({
   db: {
+    signal: {
+      findUnique: findSignal,
+      create: createSignal,
+    },
     trade: {
       upsert: upsertTrade,
     },
@@ -64,6 +70,7 @@ function makeBaseConnection(walletAddress: string, tokenMint: string) {
 describe("SLO evaluator wired to executor outcomes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    findSignal.mockResolvedValue({ signalId: "existing-signal" });
     process.env["WALLET_PRIVATE_KEY_BASE58"] = "A".repeat(88);
     process.env["HELIUS_RPC_URL"] = "https://mainnet.helius-rpc.com/?api-key=test";
     process.env["WEBHOOK_SECRET"] = "a".repeat(32);

@@ -1,4 +1,3 @@
-import bs58 from "bs58";
 import {
   AccountRole,
   address,
@@ -26,7 +25,7 @@ export class JitoSyncError extends Error {
 }
 
 export type JitoClient = {
-  submitBundle(transactionsBase58: [string, string]): Promise<string>;
+  submitBundle(transactionsBase64: [Base64EncodedWireTransaction, Base64EncodedWireTransaction]): Promise<string>;
   getTipAccount(): Promise<Address>;
 };
 
@@ -36,8 +35,8 @@ export function createJitoClient(
   let cachedTipAccount: Address | undefined;
 
   return {
-    async submitBundle(transactionsBase58) {
-      return submitBundle(blockEngineUrl, transactionsBase58);
+    async submitBundle(transactionsBase64) {
+      return submitBundle(blockEngineUrl, transactionsBase64);
     },
     async getTipAccount() {
       cachedTipAccount ??= await getTipAccount(blockEngineUrl);
@@ -48,7 +47,7 @@ export function createJitoClient(
 
 export async function submitBundle(
   blockEngineUrl: string,
-  transactionsBase58: [string, string],
+  transactionsBase64: [Base64EncodedWireTransaction, Base64EncodedWireTransaction],
 ): Promise<string> {
   let response: Response;
   try {
@@ -59,7 +58,7 @@ export async function submitBundle(
         jsonrpc: "2.0",
         id: 1,
         method: "sendBundle",
-        params: [transactionsBase58],
+        params: [transactionsBase64, { encoding: "base64" }],
       }),
     });
   } catch (error) {
@@ -161,11 +160,6 @@ export async function createJitoTipTransaction(input: {
   };
 }
 
-export function base64WireTransactionToBase58(
-  transaction: Base64EncodedWireTransaction,
-): string {
-  return bs58.encode(Buffer.from(transaction.toString(), "base64"));
-}
 
 function createSystemTransferInstruction(
   source: Address,
