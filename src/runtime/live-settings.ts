@@ -10,6 +10,7 @@ export type LiveSettings = {
   sellRetryAttempts: number;
   retrySlippageStepBps: number;
   maxRetrySlippageBps: number;
+  retryDelayMs: number;
   walletFloorSol: number;
   feeBufferSol: number;
   maxEstimatedSpendSol: number;
@@ -98,6 +99,14 @@ const definitions: SettingDefinition[] = [
     type: "integer",
     defaultValue: 1_500,
     min: 1,
+    max: 5_000,
+  },
+  {
+    key: "retryDelayMs",
+    storageKey: "retry_delay_ms",
+    type: "integer",
+    defaultValue: 300,
+    min: 0,
     max: 5_000,
   },
   {

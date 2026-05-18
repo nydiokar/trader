@@ -205,8 +205,10 @@ function isHeliusRpc(url: string): boolean {
   return /^https:\/\/(mainnet|beta|devnet)\.helius-rpc\.com\//i.test(url);
 }
 
-function responseFor(result: SellResult) {
-  return result.response;
+function responseFor(result: SellResult): Record<string, unknown> {
+  return typeof result.response === "object" && result.response !== null
+    ? (result.response as Record<string, unknown>)
+    : {};
 }
 
 function isRetryablePreSubmit(result: SellResult): boolean {
@@ -380,7 +382,8 @@ async function main(): Promise<void> {
   const walletSolAfter = Number(walletBalanceAfter.value) / 1_000_000_000;
   const tokenBalanceAfter = await getWalletTokenBalance(mint);
   const finalResponse = finalResult ? responseFor(finalResult) : {};
-  const isLiveSignature = finalResponse.signature && !finalResponse.signature.startsWith("dry-run:");
+  const finalSignature = typeof finalResponse["signature"] === "string" ? finalResponse["signature"] : undefined;
+  const isLiveSignature = finalSignature && !finalSignature.startsWith("dry-run:");
 
   console.log(
     JSON.stringify(
@@ -411,7 +414,7 @@ async function main(): Promise<void> {
         attempts,
         result: finalResult,
         error: finalResult || args.quoteOnly ? undefined : finalError,
-        explorerUrl: isLiveSignature ? `https://solscan.io/tx/${finalResponse.signature}` : undefined,
+        explorerUrl: isLiveSignature ? `https://solscan.io/tx/${finalSignature}` : undefined,
       },
       null,
       2,

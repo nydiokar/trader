@@ -44,7 +44,7 @@ import {
   HeliusSenderSyncError,
   type HeliusSenderClient,
 } from "./helius-sender.js";
-import { getQuote, getQuoteForSwap, getSwapInstructions, WSOL_MINT } from "./jupiter.js";
+import { getQuote, getQuoteForSwap, getSwapInstructions, JupiterApiError, WSOL_MINT } from "./jupiter.js";
 import { getPriorityFeeEstimate } from "./priority_fee.js";
 import {
   notify,
@@ -606,8 +606,15 @@ export async function executeSignalWithDependencies(
     const outcome: Extract<ExecutionOutcome, "pre_submit_failed" | "uncertain"> =
       signature && submissionAttempted ? "uncertain" : "pre_submit_failed";
 
+    const errorKind = error instanceof JupiterApiError ? error.kind : undefined;
+
     logger.error(
-      { err: error, signal_id: input.signalId, signature: signature?.toString() },
+      {
+        err: error,
+        signal_id: input.signalId,
+        signature: signature?.toString(),
+        error_kind: errorKind,
+      },
       submissionAttempted
         ? "executor failed after submission"
         : "executor failed before submission",
@@ -630,6 +637,7 @@ export async function executeSignalWithDependencies(
       response: {
         error: outcome,
         signal_id: input.signalId,
+        ...(errorKind !== undefined ? { error_kind: errorKind } : {}),
         ...(submissionAttempted && signature ? { signature: signature.toString() } : {}),
         ...(submissionAttempted && submittedVia ? { submitted_via: submittedVia } : {}),
       },

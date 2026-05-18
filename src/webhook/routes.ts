@@ -64,6 +64,7 @@ type SignalProcessor = (payload: {
   entry_price_usd?: number;
   entry_liquidity_usd?: number | null;
   planned_exit_policy_label?: string;
+  client_timestamp?: number;
 }) => Promise<{
   state: "done" | "failed" | "rejected";
   decision: string;
@@ -723,12 +724,43 @@ async function executeSignalWithRuntimeRetries(
   let finalResult: Awaited<ReturnType<typeof executeSignal>> | null = null;
   const totalAttempts = Math.max(1, settings.buyRetryAttempts);
 
+  // track slippage step-ups separately — only increment on invalid_quote, not on transient errors
+  let slippageStepIndex = 0;
+  // track the error kind from the previous attempt to decide retry strategy
+  let prevErrorKind: string | undefined;
+
   for (let index = 0; index < totalAttempts; index += 1) {
     const attempt = index + 1;
+
+    // abort retry if signal has gone stale between attempts
+    if (index > 0 && payload.client_timestamp !== undefined) {
+      const signalAgeSeconds = Math.floor(Date.now() / 1000) - payload.client_timestamp;
+      if (signalAgeSeconds > settings.signalMaxAgeSeconds) {
+        logger.warn(
+          { signal_id: payload.signal_id, signal_age_seconds: signalAgeSeconds, attempt },
+          "aborting retry — signal stale",
+        );
+        break;
+      }
+    }
+
     const slippageBps = Math.min(
-      payload.max_slippage_bps + index * settings.retrySlippageStepBps,
+      payload.max_slippage_bps + slippageStepIndex * settings.retrySlippageStepBps,
       settings.maxRetrySlippageBps,
     );
+
+    if (index > 0) {
+      logger.info(
+        {
+          signal_id: payload.signal_id,
+          attempt,
+          slippage_bps: slippageBps,
+          prev_error_kind: prevErrorKind,
+        },
+        "retrying signal execution",
+      );
+    }
+
     const result = await executeSignal(
       payload.signal_id,
       payload.token_mint,
@@ -751,6 +783,15 @@ async function executeSignalWithRuntimeRetries(
       result.state === "failed" &&
       result.decision === "pre_submit_failed" &&
       typeof response["signature"] !== "string";
+
+    const errorKind = typeof response["error_kind"] === "string" ? response["error_kind"] : undefined;
+    prevErrorKind = errorKind;
+
+    // only step up slippage when the failure was specifically a price impact rejection
+    if (retryablePreSubmit && errorKind === "invalid_quote") {
+      slippageStepIndex += 1;
+    }
+
     attempts.push({
       attempt,
       slippage_bps: slippageBps,
@@ -762,6 +803,12 @@ async function executeSignalWithRuntimeRetries(
 
     if (!retryablePreSubmit) {
       break;
+    }
+
+    // backoff before next attempt — gives Jupiter time to recover on upstream errors
+    // and avoids hammering an illiquid token repeatedly
+    if (index < totalAttempts - 1 && settings.retryDelayMs > 0) {
+      await new Promise<void>((resolve) => setTimeout(resolve, settings.retryDelayMs));
     }
   }
 

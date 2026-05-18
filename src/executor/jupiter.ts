@@ -85,7 +85,7 @@ export async function getQuoteForSwap(
     if (priceImpactPct > maxSlippageBps / 10_000) {
       throw new JupiterApiError(
         "invalid_quote",
-        "Jupiter quote price impact exceeds max slippage",
+        `Jupiter quote price impact exceeds max slippage: impact=${priceImpactPct.toFixed(4)} limit=${(maxSlippageBps / 10_000).toFixed(4)}`,
       );
     }
 
