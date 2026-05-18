@@ -1,6 +1,6 @@
 # Trader Bot - Project Context
 
-**Branch:** `main` | **Last Updated:** 2026-05-16 | **Status:** M0-M3 complete. M4-M5 core executor implemented with deterministic coverage; M6-M7 partially implemented; Flow-to-bot dry-run bridge Stages 1-5 complete for production dry-run observability; Stage 6 live-readiness recheck evaluator implemented; live trading promotion remains blocked.
+**Branch:** `main` | **Last Updated:** 2026-05-16 | **Status:** M0-M3 complete. M4-M5 core executor implemented with deterministic coverage; M6-M7 partially implemented; Flow-to-bot dry-run bridge Stages 1-5 complete for production dry-run observability; Stage 6 live-readiness recheck evaluator implemented; live trading is fact - currently only buying.
 
 ---
 
@@ -212,6 +212,35 @@ Hard constraints:
 - Do not call Jupiter, sign transactions, or submit transactions in the Flow dry-run bridge.
 - Persist every bridge attempt, including rejects and duplicates, in DB.
 - Keep execution/capital risk checks in the bot, separate from Flow alpha/gating logic.
+
+### Planned: PumpFun Router Fallback
+
+Spec: `.ai/milestones/M-pumpfun-router.md`
+
+Buy-only. Signal source sends ungraduated bonding-curve tokens regularly — Jupiter rejects these permanently as `TOKEN_NOT_TRADABLE`. Bot already classifies and drops them correctly (2026-05-18) but cannot buy them. This adds a PumpFun AMM direct-buy fallback triggered only on `no_route`.
+
+- [ ] Evaluate `@pumpdotfun-sdk/pumpfun-sdk` vs manual IDL — npm maturity, last publish, auto-detection of graduated vs ungraduated state.
+- [ ] Implement `src/executor/pumpfun.ts` — direct buy against bonding curve, reusing existing wallet/priority-fee/submission/confirmation infrastructure.
+- [ ] Wire fallback in `src/executor/index.ts`: catch `no_route` from Jupiter quote step, attempt PumpFun before returning `pre_submit_failed`.
+- [ ] Add `submitted_via=pumpfun_amm` to trade rows and `pumpfun_fallback_attempted_total` + `pumpfun_fallback_result_total` metrics.
+- [ ] Map dead/drained token to `error_kind=pumpfun_no_liquidity` — graceful failure, no SOL spent.
+- [ ] Extend `pnpm canary:buy` with `--router pumpfun` flag for quote-only and live testing.
+- [ ] Canary evidence: one confirmed PumpFun buy, one graceful dead-token rejection, Jupiter path unaffected.
+
+---
+
+### Planned: Trade Registry + Sell Signal Wiring
+
+Spec: `.ai/milestones/M-trade-registry-and-sell-wiring.md`
+
+`tokens_ingest` is fully ready: `POST /positions/open`, `POST /positions/close`, `GET /positions/exit-pending` are live. `ExitMonitor` fires immediately on any row posted. Bot's `/flow/exit` and `executeTokenSell` are already implemented. This milestone is purely the wiring between the two so the full buy→hold→sell loop works end-to-end.
+
+- [ ] On every confirmed buy, `POST /positions/open` to `tokens_ingest` with `run_id`, `signal_id`, `token_mint`, `entry_price_usd`, `token_amount_raw`, `size_sol`.
+- [ ] Validate that `ExitMonitor` picks up the posted position and fires a `/flow/exit` signal back to the bot.
+- [ ] Validate that bot executes the sell and calls `POST /positions/close` on `tokens_ingest` with the result.
+- [ ] Enable `sell_execution_enabled=true` and run a full buy→hold→sell canary at 0.0001 SOL.
+
+---
 
 ### Planned: M4 - Mainnet Production Executor
 
@@ -425,6 +454,7 @@ Retry contract for the upstream sender:
 - `pnpm flow:live-readiness` evaluates accepted dry-run journals against current bot state and emits a machine-readable `flow_live_readiness_v1` JSON report with `would_promote_live`, `blocker_codes`, per-check statuses, and executor path summary. The command is read-only and cannot reach quote, signing, submission, or executor trading paths. Latest export: `data/live-readiness-export.json` (16 journals, all blocked by `live_execution_disabled`, 15 also by `signal_stale`, all executor paths `invoked: false`).
 - 2026-05-17 live canary: `pnpm canary:buy -- --live --confirm I_UNDERSTAND_THIS_SPENDS_REAL_SOL --amount-sol 0.0001` confirmed via Helius Sender. Signature `3NMpSvrvq2fXuKjaEq2beJsEXKDdfsgQvZtwHdc6xkfKoMAieAsyWSP22dmmxN6erYzxeLE8FtnrTzYQrKfyXc1r`, finalized `err: null`, actual out `0.008619` USDC, submit-to-confirm `2.842s`, wallet delta `-0.000329262` SOL.
 - 2026-05-17 signal-token live canary: `pnpm canary:buy -- --live --confirm I_UNDERSTAND_THIS_SPENDS_REAL_SOL --mint 6AYzKrHYAP34JwZqHt5kj2qRwDHAb9N6dJQcV9Tipump --amount-sol 0.0001` confirmed via Helius Sender. Signature `5smbUB4YA3zKr3Wg9wFjDT1Ecm28231KuXx4deaLBnetmpXUkZrvW5DyDgLn5uVKxo2Pnm14vsFQms5gaUXT4gBt`, finalized `err: null`, actual out `3532.411669`, submit-to-confirm `3.088s`, wallet delta `-0.00436436` SOL. This proved manual tiny buys for real signal token mints are viable, and exposed that first-time token account/rent/setup can exceed the previous `0.003` SOL canary buffer.
+- 2026-05-18 executor robustness pass: (1) `no_route` error kind added to `JupiterApiError` — `TOKEN_NOT_TRADABLE` and `COULD_NOT_FIND_ANY_ROUTE` Jupiter 400 responses now classified as permanent non-retryable failures; middleware captures response body before SDK consumes it. (2) Retry loop made error-kind-aware — slippage step-up only on `invalid_quote`, flat on `upstream`/`timeout`; `no_route` breaks retry loop immediately. (3) `retryDelayMs` live setting added (default 300ms). (4) Signal age checked inside retry loop. (5) `error_kind` surfaced in executor response and error logs. (6) Priority fee hard cap raised from 1M to 4M microlamports. (7) Live settings updated: `retry_slippage_step_bps=400`, `max_retry_slippage_bps=1500`, `retry_delay_ms=300`. Slippage ladder is now 600→1000→1400bps across 3 attempts.
 - Known design limitation: `previously_seen_token` check in the live-readiness recheck is inert for DB-backed batch evaluation because the DB returns distinct token_mints including the current journal's token, which the evaluator filters out. The check becomes meaningful at single-signal live-promotion time when per-signal DB queries exclude the current signal. Documented in `src/flow/live-readiness.ts`.
 
 ---

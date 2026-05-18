@@ -11,7 +11,7 @@ export const WSOL_MINT = "So11111111111111111111111111111111111111112";
 
 export class JupiterApiError extends Error {
   constructor(
-    readonly kind: "invalid_quote" | "rate_limited" | "timeout" | "upstream",
+    readonly kind: "invalid_quote" | "no_route" | "rate_limited" | "timeout" | "upstream",
     message: string,
     readonly statusCode?: number,
   ) {
@@ -20,6 +20,24 @@ export class JupiterApiError extends Error {
   }
 }
 
+// Middleware that captures the parsed error body from non-OK responses before the SDK
+// consumes and discards it. Attaches it as `parsedErrorBody` on the Response object
+// so normalizeJupiterError can read errorCode without re-fetching.
+const errorBodyCapture = {
+  async post(context: { response: Response }): Promise<Response> {
+    if (!context.response.ok) {
+      try {
+        const clone = context.response.clone();
+        const body = await clone.json();
+        (context.response as Response & { parsedErrorBody?: unknown }).parsedErrorBody = body;
+      } catch {
+        // ignore — body may not be JSON
+      }
+    }
+    return context.response;
+  },
+};
+
 const jupiter = createJupiterApiClient({
   basePath: config.JUPITER_BASE_URL,
   headers: config.JUPITER_API_KEY
@@ -27,6 +45,7 @@ const jupiter = createJupiterApiClient({
         "x-api-key": config.JUPITER_API_KEY,
       }
     : undefined,
+  middleware: [errorBodyCapture],
 });
 
 export async function getQuote(
@@ -134,7 +153,25 @@ function normalizeJupiterError(
     return new JupiterApiError("timeout", fallbackMessage);
   }
 
+  if (statusCode === 400) {
+    const errorCode = getJupiterErrorCode(error);
+    if (errorCode === "TOKEN_NOT_TRADABLE" || errorCode === "COULD_NOT_FIND_ANY_ROUTE") {
+      return new JupiterApiError("no_route", `Jupiter has no route for this token (${errorCode})`, 400);
+    }
+  }
+
   return new JupiterApiError("upstream", fallbackMessage, statusCode);
+}
+
+function getJupiterErrorCode(error: unknown): string | undefined {
+  if (typeof error === "object" && error !== null && "response" in error) {
+    const body = (error as { response?: { parsedErrorBody?: unknown } }).response?.parsedErrorBody;
+    if (typeof body === "object" && body !== null && "errorCode" in body) {
+      const code = (body as { errorCode?: unknown }).errorCode;
+      return typeof code === "string" ? code : undefined;
+    }
+  }
+  return undefined;
 }
 
 function getStatusCode(error: unknown): number | undefined {

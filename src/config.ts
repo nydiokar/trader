@@ -89,7 +89,7 @@ const ConfigSchema = z.object({
 
   // Priority fee
   PRIORITY_FEE_LEVEL: z.enum(["Medium", "High", "VeryHigh"]).default("High"),
-  PRIORITY_FEE_HARD_CAP_MICROLAMPORTS: z.coerce.number().int().positive().default(1_000_000),
+  PRIORITY_FEE_HARD_CAP_MICROLAMPORTS: z.coerce.number().int().positive().default(4_000_000),
   PRIORITY_FEE_FALLBACK_MICROLAMPORTS: z.coerce.number().int().positive().default(50_000),
 
   // Database
