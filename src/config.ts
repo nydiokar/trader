@@ -71,8 +71,8 @@ const ConfigSchema = z.object({
   TRIPWIRES_AS_BLOCKERS: booleanEnv("false"),
 
   // Observability
-  TELEGRAM_BOT_TOKEN: z.string().optional(),
-  TELEGRAM_CHAT_ID: z.string().optional(),
+  TRADE_TELEGRAM_BOT_TOKEN: z.string().optional(),
+  TRADE_TELEGRAM_CHAT_ID: z.string().optional(),
   LOG_LEVEL: z
     .string()
     .default("info")

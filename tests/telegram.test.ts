@@ -6,8 +6,8 @@ describe("telegram notifications", () => {
     process.env["WALLET_PRIVATE_KEY_BASE58"] = "A".repeat(88);
     process.env["HELIUS_RPC_URL"] = "https://mainnet.helius-rpc.com/?api-key=test";
     process.env["WEBHOOK_SECRET"] = "a".repeat(32);
-    process.env["TELEGRAM_BOT_TOKEN"] = "token";
-    process.env["TELEGRAM_CHAT_ID"] = "chat";
+    process.env["TRADE_TELEGRAM_BOT_TOKEN"] = "token";
+    process.env["TRADE_TELEGRAM_CHAT_ID"] = "chat";
   });
 
   it("posts notifications to Telegram when configured", async () => {
@@ -108,5 +108,65 @@ describe("telegram notifications", () => {
     const exitFailed = formatExitFailed({ tokenMint: "mintXYZ", positionId: "pos-1", error: "zero_token_balance" });
     expect(exitFailed).toContain("EXIT FAILED");
     expect(exitFailed).toContain("zero_token_balance");
+  });
+
+  it("formatExitConfirmed includes P&L when entry and received SOL are both known", async () => {
+    const { formatExitConfirmed } = await import("../src/notify/telegram.js");
+
+    const profit = formatExitConfirmed({
+      tokenMint: "mintXYZ",
+      positionId: "pos-1",
+      signature: "sig123",
+      triggerReason: "take_profit",
+      sizeSol: 0.01,
+      solReceived: 0.012,
+    });
+    expect(profit).toContain("P&L");
+    expect(profit).toContain("+");
+    expect(profit).toContain("0.01 SOL");
+    expect(profit).toContain("0.012000 SOL");
+    expect(profit).toContain("+20.00%");
+
+    const loss = formatExitConfirmed({
+      tokenMint: "mintXYZ",
+      positionId: "pos-1",
+      signature: "sig123",
+      triggerReason: "stop_loss",
+      sizeSol: 0.01,
+      solReceived: 0.008,
+    });
+    expect(loss).toContain("P&L");
+    expect(loss).toContain("-");
+    expect(loss).toContain("-20.00%");
+  });
+
+  it("formatExitConfirmed falls back to size only when solReceived is missing", async () => {
+    const { formatExitConfirmed } = await import("../src/notify/telegram.js");
+
+    const msg = formatExitConfirmed({
+      tokenMint: "mintXYZ",
+      positionId: "pos-1",
+      signature: "sig123",
+      triggerReason: "take_profit",
+      sizeSol: 0.01,
+    });
+    expect(msg).toContain("0.01 SOL");
+    expect(msg).not.toContain("P&L");
+  });
+
+  it("formatClosePendingAlert includes token, position, stuck duration, and tx link", async () => {
+    const { formatClosePendingAlert } = await import("../src/notify/telegram.js");
+
+    const msg = formatClosePendingAlert({
+      tokenMint: "mintXYZ",
+      positionId: "pos-1",
+      signature: "sig123",
+      stuckMinutes: 15,
+    });
+    expect(msg).toContain("CLOSE CALLBACK STUCK");
+    expect(msg).toContain("15 min");
+    expect(msg).toContain("mintXYZ");
+    expect(msg).toContain("solscan.io/tx/sig123");
+    expect(msg).toContain("pos-1");
   });
 });

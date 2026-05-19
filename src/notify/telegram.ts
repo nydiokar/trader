@@ -2,18 +2,18 @@ import { config } from "../config.js";
 import { logger } from "../logger.js";
 
 export async function notify(message: string): Promise<void> {
-  if (!config.TELEGRAM_BOT_TOKEN || !config.TELEGRAM_CHAT_ID) {
+  if (!config.TRADE_TELEGRAM_BOT_TOKEN || !config.TRADE_TELEGRAM_CHAT_ID) {
     logger.debug("telegram notification skipped because config is missing");
     return;
   }
 
   const response = await fetch(
-    `https://api.telegram.org/bot${config.TELEGRAM_BOT_TOKEN}/sendMessage`,
+    `https://api.telegram.org/bot${config.TRADE_TELEGRAM_BOT_TOKEN}/sendMessage`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        chat_id: config.TELEGRAM_CHAT_ID,
+        chat_id: config.TRADE_TELEGRAM_CHAT_ID,
         text: message,
         parse_mode: "HTML",
         link_preview_options: { is_disabled: true },
@@ -128,13 +128,22 @@ export function formatExitConfirmed(input: {
   signature: string;
   triggerReason: string;
   sizeSol?: number;
+  solReceived?: number;
 }): string {
   const lines = [
     `💰 <b>EXIT CONFIRMED</b>`,
     `Token: <code>${input.tokenMint}</code>`,
     `Reason: ${input.triggerReason}`,
   ];
-  if (input.sizeSol != null) lines.push(`Size: ${input.sizeSol} SOL`);
+  if (input.sizeSol != null && input.solReceived != null) {
+    const pnlSol = input.solReceived - input.sizeSol;
+    const pnlPct = (pnlSol / input.sizeSol) * 100;
+    const sign = pnlSol >= 0 ? "+" : "";
+    lines.push(`P&L: ${sign}${pnlSol.toFixed(6)} SOL (${sign}${pnlPct.toFixed(2)}%)`);
+    lines.push(`In: ${input.sizeSol} SOL → Out: ${input.solReceived.toFixed(6)} SOL`);
+  } else if (input.sizeSol != null) {
+    lines.push(`Size: ${input.sizeSol} SOL`);
+  }
   lines.push(
     `Tx: https://solscan.io/tx/${input.signature}`,
     `Position: <code>${input.positionId}</code>`,
@@ -159,6 +168,22 @@ export function formatExitFailed(input: {
 }
 
 // ── System alerts ───────────────────────────────────────────────────────────
+
+export function formatClosePendingAlert(input: {
+  tokenMint: string;
+  positionId: string;
+  signature?: string;
+  stuckMinutes: number;
+}): string {
+  const lines = [
+    `⚠️ <b>CLOSE CALLBACK STUCK</b>`,
+    `Token: <code>${input.tokenMint}</code>`,
+    `Stuck: ${input.stuckMinutes} min (sell confirmed, registry not updated)`,
+  ];
+  if (input.signature) lines.push(`Tx: https://solscan.io/tx/${input.signature}`);
+  lines.push(`Position: <code>${input.positionId}</code>`);
+  return lines.join("\n");
+}
 
 export function formatKillSwitchTriggered(cause: string): string {
   return `🔴 <b>KILL SWITCH</b>\n${cause}`;
