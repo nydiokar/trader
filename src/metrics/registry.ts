@@ -130,6 +130,48 @@ for (const path of [
   executorPathReachability.labels(path).inc(0);
 }
 
+// ── Exit (sell) side metrics ────────────────────────────────────────────────
+
+export const exitsAttempted = new Counter({
+  name: "exits_attempted_total",
+  help: "Exit sell attempts by mode",
+  labelNames: ["dry_run"] as const,
+  registers: [register],
+});
+
+export const exitsConfirmed = new Counter({
+  name: "exits_confirmed_total",
+  help: "Exit sells that confirmed on-chain by mode",
+  labelNames: ["dry_run"] as const,
+  registers: [register],
+});
+
+export const exitsClosePending = new Counter({
+  name: "exits_close_pending_total",
+  help: "Exit sells confirmed on-chain but position close callback failed",
+  registers: [register],
+});
+
+export const exitSellToConfirmSeconds = new Histogram({
+  name: "exit_sell_to_confirm_seconds",
+  help: "Latency from exit sell submission to on-chain confirmation",
+  buckets: [1, 2, 5, 10, 20, 45],
+  registers: [register],
+});
+
+export const closePendingCount = new Gauge({
+  name: "close_pending_count",
+  help: "Current number of positions confirmed on-chain but not yet closed in Flow registry",
+  registers: [register],
+});
+
+for (const dryRun of ["true", "false"] as const) {
+  exitsAttempted.labels(dryRun).inc(0);
+  exitsConfirmed.labels(dryRun).inc(0);
+}
+exitsClosePending.inc(0);
+closePendingCount.set(0);
+
 walletSolBalance.set(0);
 dailySpendSol.set(0);
 killSwitchGauge.set(0);

@@ -11,6 +11,7 @@
     "canary:buy": "tsx src/solana/canary-buy.ts",
     "canary:sell": "tsx src/solana/canary-sell.ts",
     "live:settings": "tsx src/ops/live-settings.ts",
+    "ops:positions": "tsx src/ops/positions.ts",
     "build": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",

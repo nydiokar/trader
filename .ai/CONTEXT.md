@@ -174,7 +174,7 @@ M4 task scaffold: `.ai/milestones/M4.md`
 - [x] Telegram wired to confirmed/failed_onchain/expired/uncertain executor outcomes via `safeNotify`.
 - [x] Signal lifecycle notifications: `formatSignalReceived` (fires only after all risk checks pass), `formatSignalRejected` (all blocker reasons + signal_stale + tripwire-as-blocker), `formatTripwiresWarning` (soft tripwire proceed).
 - [x] Exit lifecycle notifications: `formatExitTriggered` (on actual sell attempt), `formatExitConfirmed`, `formatExitFailed` (sell disabled, zero balance, tx failed).
-- [x] Bot token and chat ID are env-var driven (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`); dedicate one bot per project to prevent cross-project contamination.
+- [x] Bot token and chat ID are env-var driven (`TRADE_TELEGRAM_BOT_TOKEN`, `TRADE_TELEGRAM_CHAT_ID`); dedicate one bot per project to prevent cross-project contamination.
 - [ ] Staging verification that every Telegram event type arrives (requires dedicated bot token in `.env`).
 - [ ] **[MUST]** Wire Telegram alerts for Flow dry-run accepted, rejected, invalid payload, and processing error outcomes.
 

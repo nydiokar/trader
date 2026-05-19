@@ -1,6 +1,6 @@
 import { config } from "../config.js";
 import { logger } from "../logger.js";
-import { fetchExitPendingSignals, handleFlowExitSignal } from "./exit.js";
+import { fetchExitPendingSignals, handleFlowExitSignal, recoverClosePending } from "./exit.js";
 
 // Safety-net only. The Flow ExitMonitor now pushes exit signals directly to
 // POST /flow/exit the moment trail70 fires. This poller runs at a slow cadence
@@ -52,34 +52,48 @@ export class FlowExitPoller {
   }
 
   private async runOnce(): Promise<void> {
-    let signals;
-    try {
-      signals = await fetchExitPendingSignals();
-    } catch (error) {
-      logger.error({ err: error }, "flow exit poll failed");
-      return;
+    // Pass 1: fetch exit_pending positions from Flow registry and sell them
+    if (config.TOKENS_INGEST_BASE_URL) {
+      let signals: Awaited<ReturnType<typeof fetchExitPendingSignals>> = [];
+      try {
+        signals = await fetchExitPendingSignals();
+      } catch (error) {
+        logger.error({ err: error }, "flow exit poll failed");
+      }
+
+      if (signals.length > 0) {
+        logger.info({ count: signals.length }, "flow exit poll found pending exits");
+        for (const signal of signals) {
+          try {
+            const result = await handleFlowExitSignal(signal);
+            logger.info(
+              {
+                position_id: result.position_id,
+                status: result.status,
+                dry_run: result.dry_run,
+                error: result.error,
+              },
+              "flow exit poll handled signal",
+            );
+          } catch (error) {
+            logger.error(
+              { err: error, position_id: signal.position_id, token_mint: signal.token_mint },
+              "flow exit poll signal failed",
+            );
+          }
+        }
+      }
     }
 
-    if (signals.length === 0) return;
-    logger.info({ count: signals.length }, "flow exit poll found pending exits");
-
-    for (const signal of signals) {
+    // Pass 2: retry any positions whose sell confirmed on-chain but close callback failed
+    if (!config.DRY_RUN) {
       try {
-        const result = await handleFlowExitSignal(signal);
-        logger.info(
-          {
-            position_id: result.position_id,
-            status: result.status,
-            dry_run: result.dry_run,
-            error: result.error,
-          },
-          "flow exit poll handled signal",
-        );
+        const recovery = await recoverClosePending();
+        if (recovery.recovered > 0 || recovery.stillPending > 0) {
+          logger.info(recovery, "close_pending recovery pass complete");
+        }
       } catch (error) {
-        logger.error(
-          { err: error, position_id: signal.position_id, token_mint: signal.token_mint },
-          "flow exit poll signal failed",
-        );
+        logger.error({ err: error }, "close_pending recovery pass failed");
       }
     }
   }

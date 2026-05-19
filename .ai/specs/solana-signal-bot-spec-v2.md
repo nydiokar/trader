@@ -650,7 +650,7 @@ Required gauges:
 
 ### 5.3 Notifications (Telegram)
 
-Env: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`.
+Env: `TRADE_TELEGRAM_BOT_TOKEN`, `TRADE_TELEGRAM_CHAT_ID`.
 
 Events that MUST notify:
 - ✅ Trade confirmed: `"✅ BUY {amount_sol} SOL → {actual_out} {symbol}\nMint: {mint}\nTx: {explorer_link}\nLatency: {seconds}s"`
@@ -722,8 +722,8 @@ RUGCHECK_API_KEY                 # optional
 TRIPWIRES_AS_BLOCKERS            # default false
 
 # Observability
-TELEGRAM_BOT_TOKEN
-TELEGRAM_CHAT_ID
+TRADE_TELEGRAM_BOT_TOKEN
+TRADE_TELEGRAM_CHAT_ID
 LOG_LEVEL                        # default info
 
 # Modes

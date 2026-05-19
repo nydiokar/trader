@@ -5,11 +5,19 @@ import { logger } from "../logger.js";
 import { getLiveSettings } from "../runtime/live-settings.js";
 import {
   notify,
+  formatClosePendingAlert,
   formatExitTriggered,
   formatExitConfirmed,
   formatExitFailed,
 } from "../notify/telegram.js";
 import { getTradingSigner } from "../solana/runtime.js";
+import {
+  closePendingCount,
+  exitsAttempted,
+  exitsClosePending,
+  exitsConfirmed,
+  exitSellToConfirmSeconds,
+} from "../metrics/registry.js";
 import {
   FlowExitHttpEnvelopeSchema,
   FlowExitSignalSchema,
@@ -157,6 +165,8 @@ export async function handleFlowExitSignal(signal: FlowExitSignal): Promise<Flow
     }),
   ).catch((err) => logger.warn({ err }, "telegram exit-triggered notification failed"));
 
+  exitsAttempted.labels("false").inc();
+  const sellStart = Date.now();
   const result = await executeTokenSell({
     exitId: claim.row.id,
     tokenMint: signal.token_mint,
@@ -193,6 +203,28 @@ export async function handleFlowExitSignal(signal: FlowExitSignal): Promise<Flow
     };
   }
 
+  exitSellToConfirmSeconds.observe((Date.now() - sellStart) / 1000);
+  exitsConfirmed.labels("false").inc();
+
+  const solReceived = result.response.sol_received;
+  const sizeSol = signal.size_sol;
+  const pnlSol = solReceived != null && sizeSol != null ? solReceived - sizeSol : undefined;
+  const pnlPct = pnlSol != null && sizeSol != null && sizeSol > 0 ? (pnlSol / sizeSol) * 100 : undefined;
+
+  logger.info(
+    {
+      position_id: signal.position_id,
+      token_mint: signal.token_mint,
+      trigger_reason: signal.trigger_reason,
+      size_sol: sizeSol,
+      sol_received: solReceived,
+      pnl_sol: pnlSol,
+      pnl_pct: pnlPct != null ? parseFloat(pnlPct.toFixed(4)) : undefined,
+      signature: result.response.signature,
+    },
+    "exit sell confirmed",
+  );
+
   if (result.response.signature) {
     notify(
       formatExitConfirmed({
@@ -200,7 +232,8 @@ export async function handleFlowExitSignal(signal: FlowExitSignal): Promise<Flow
         positionId: signal.position_id,
         signature: result.response.signature,
         triggerReason: signal.trigger_reason,
-        sizeSol: signal.size_sol,
+        sizeSol: sizeSol,
+        solReceived: solReceived,
       }),
     ).catch((err) => logger.warn({ err }, "telegram exit-confirmed notification failed"));
   } else {
@@ -243,6 +276,9 @@ async function journalDryRunExit(signal: FlowExitSignal): Promise<FlowExitResult
   if (existing?.state === "dry_run_journaled") {
     return terminalResult(signal, existing, "already_processed");
   }
+
+  exitsAttempted.labels("true").inc();
+  exitsConfirmed.labels("true").inc();
 
   const row = await upsertExitRow(signal, {
     state: "dry_run_journaled",
@@ -355,6 +391,20 @@ async function retryCloseOnly(
     completedAt: closeResult.ok ? new Date() : null,
   });
 
+  if (!closeResult.ok) {
+    exitsClosePending.inc();
+    logger.warn(
+      {
+        position_id: signal.position_id,
+        token_mint: signal.token_mint,
+        close_callback_status: closeResult.status,
+      },
+      "exit sell confirmed but position close callback failed — will retry",
+    );
+  }
+
+  await refreshClosePendingGauge();
+
   return {
     status: closeResult.ok ? "closed" : "close_pending",
     position_id: signal.position_id,
@@ -363,6 +413,98 @@ async function retryCloseOnly(
     dry_run: false,
     error: closeResult.ok ? undefined : "position_close_failed",
   };
+}
+
+async function refreshClosePendingGauge(): Promise<void> {
+  try {
+    const count = await db.flowExitExecution.count({
+      where: { state: "sell_confirmed_close_pending" },
+    });
+    closePendingCount.set(count);
+  } catch {
+    // non-fatal — gauge is best-effort
+  }
+}
+
+const CLOSE_PENDING_ALERT_MINUTES = 10;
+
+export type RecoverClosePendingResult = {
+  recovered: number;
+  stillPending: number;
+  alerted: number;
+};
+
+export async function recoverClosePending(): Promise<RecoverClosePendingResult> {
+  const stuckRows = await db.flowExitExecution.findMany({
+    where: { state: "sell_confirmed_close_pending" },
+    orderBy: { updatedAt: "asc" },
+  });
+
+  if (stuckRows.length === 0) {
+    return { recovered: 0, stillPending: 0, alerted: 0 };
+  }
+
+  logger.info({ count: stuckRows.length }, "close_pending recovery: found stuck positions");
+
+  let recovered = 0;
+  let stillPending = 0;
+  let alerted = 0;
+  const alertThresholdMs = CLOSE_PENDING_ALERT_MINUTES * 60 * 1000;
+  const now = Date.now();
+
+  for (const row of stuckRows) {
+    let signal: FlowExitSignal;
+    try {
+      signal = FlowExitSignalSchema.parse(JSON.parse(row.rawSignalJson));
+    } catch (err) {
+      logger.error(
+        { err, position_id: row.positionId },
+        "close_pending recovery: failed to parse raw signal — skipping",
+      );
+      stillPending++;
+      continue;
+    }
+
+    const stuckMs = now - row.updatedAt.getTime();
+    if (stuckMs > alertThresholdMs) {
+      const stuckMinutes = Math.floor(stuckMs / 60_000);
+      notify(
+        formatClosePendingAlert({
+          tokenMint: row.tokenMint,
+          positionId: row.positionId,
+          signature: row.signature ?? undefined,
+          stuckMinutes,
+        }),
+      ).catch((err) => logger.warn({ err }, "telegram close-pending alert failed"));
+      alerted++;
+    }
+
+    try {
+      const result = await retryCloseOnly(signal, row);
+      if (result.status === "closed") {
+        recovered++;
+        logger.info(
+          { position_id: row.positionId, token_mint: row.tokenMint },
+          "close_pending recovery: position closed successfully",
+        );
+      } else {
+        stillPending++;
+        logger.warn(
+          { position_id: row.positionId, token_mint: row.tokenMint },
+          "close_pending recovery: close callback still failing",
+        );
+      }
+    } catch (err) {
+      stillPending++;
+      logger.error(
+        { err, position_id: row.positionId, token_mint: row.tokenMint },
+        "close_pending recovery: retryCloseOnly threw unexpectedly",
+      );
+    }
+  }
+
+  await refreshClosePendingGauge();
+  return { recovered, stillPending, alerted };
 }
 
 function terminalResult(
