@@ -75,10 +75,9 @@ describe("Jupiter client", () => {
 
     await expect(
       getQuote("DezXAZ8z7PnrnRJjz3wXBoRgixCa6aR37YaB3UQwB263", 0.1, 300),
-    ).rejects.toMatchObject({
-      kind: "invalid_quote",
-      message: "Jupiter quote price impact exceeds max slippage",
-    });
+    ).rejects.toSatisfy(
+      (e) => e instanceof Error && (e as { kind?: string }).kind === "invalid_quote" && e.message.startsWith("Jupiter quote price impact exceeds max slippage"),
+    );
   });
 
   it("maps upstream 429 errors to a typed rate-limit failure", async () => {

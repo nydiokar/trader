@@ -254,14 +254,6 @@ export async function registerRoutes(
       "signal accepted",
     );
     signalsReceived.inc({ result: "accepted" });
-    notify(
-      formatSignalReceived({
-        signalId: payload.signal_id,
-        tokenMint: payload.token_mint,
-        amountSol: payload.amount_sol,
-        entryPriceUsd: payload.entry_price_usd,
-      }),
-    ).catch((err) => logger.warn({ err }, "telegram signal-received notification failed"));
 
     try {
       const settings = await liveSettingsLoader();
@@ -388,6 +380,16 @@ export async function registerRoutes(
             tripwires: tripwires.triggered,
           }),
         ).catch((err) => logger.warn({ err }, "telegram tripwire warning notification failed"));
+        // tripwire warning already tells the operator we're proceeding — skip signal-received
+      } else {
+        notify(
+          formatSignalReceived({
+            signalId: payload.signal_id,
+            tokenMint: payload.token_mint,
+            amountSol: executionPayload.amount_sol,
+            entryPriceUsd: payload.entry_price_usd,
+          }),
+        ).catch((err) => logger.warn({ err }, "telegram signal-received notification failed"));
       }
 
       const result = await processSignal(executionPayload);

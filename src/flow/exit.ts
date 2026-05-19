@@ -203,6 +203,11 @@ export async function handleFlowExitSignal(signal: FlowExitSignal): Promise<Flow
         sizeSol: signal.size_sol,
       }),
     ).catch((err) => logger.warn({ err }, "telegram exit-confirmed notification failed"));
+  } else {
+    logger.warn(
+      { position_id: signal.position_id, token_mint: signal.token_mint },
+      "exit confirmed but no signature available for telegram notification",
+    );
   }
 
   const pendingClose = await upsertExitRow(signal, {
