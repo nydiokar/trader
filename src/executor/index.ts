@@ -4,9 +4,15 @@ import {
   address,
   type Base64EncodedWireTransaction,
   type Blockhash,
+  decompileTransactionMessage,
+  decompileTransactionMessageFetchingLookupTables,
   getBase64EncodedWireTransaction,
+  getCompiledTransactionMessageDecoder,
   getSignatureFromTransaction,
+  getTransactionDecoder,
   type Signature,
+  setTransactionMessageFeePayerSigner,
+  setTransactionMessageLifetimeUsingBlockhash,
   signTransactionMessageWithSigners,
 } from "@solana/kit";
 import { config } from "../config.js";
@@ -102,11 +108,18 @@ type SloQueryResult = {
 
 type SloQueryFn = (windowStartSeconds: number) => Promise<SloQueryResult>;
 
+type BuildSwapTxFn = (
+  base64Tx: string,
+  wallet: Awaited<ReturnType<typeof getTradingSigner>>,
+  connection: ChainClient,
+) => Promise<{ transaction: Awaited<ReturnType<typeof signTransactionMessageWithSigners>> }>;
+
 type ExecutorDependencies = {
   connection: ChainClient;
   wallet: Awaited<ReturnType<typeof getTradingSigner>>;
   quoteClient: QuoteClient;
   priorityFeeClient: PriorityFeeClient;
+  buildSwapTx?: BuildSwapTxFn;
   heliusSenderClient?: HeliusSenderClient;
   jitoClient?: JitoClient;
   submissionMode?: SubmissionMode;
@@ -178,8 +191,10 @@ type PositionFeedbackInput = {
 };
 
 function defaultDependencies(): Promise<ExecutorDependencies> {
+  const rpc = getSolanaRpc();
   return Promise.resolve({
-    connection: createChainClient(getSolanaRpc()),
+    connection: createChainClient(rpc),
+    buildSwapTx: (base64Tx: string, wallet: Awaited<ReturnType<typeof getTradingSigner>>, connection: ChainClient) => deserializeAndSign(base64Tx, wallet, connection, rpc),
     quoteClient: {
       getQuote,
       getSwap,
@@ -290,7 +305,8 @@ export async function executeTokenSellWithDependencies(
       deps.wallet.address.toString(),
       Number(priorityFeeMicroLamports),
     );
-    const builtTransaction = await deserializeAndSign(
+    const buildFn = deps.buildSwapTx ?? (() => { throw new Error("buildSwapTx dep required"); });
+    const builtTransaction = await buildFn(
       swapResponse.swapTransaction,
       deps.wallet,
       deps.connection,
@@ -406,7 +422,8 @@ export async function executeSignalWithDependencies(
       deps.wallet.address.toString(),
       Number(priorityFeeMicroLamports),
     );
-    const builtTransaction = await deserializeAndSign(
+    const buildFn = deps.buildSwapTx ?? (() => { throw new Error("buildSwapTx dep required"); });
+    const builtTransaction = await buildFn(
       swapResponse.swapTransaction,
       deps.wallet,
       deps.connection,
@@ -743,10 +760,11 @@ async function deserializeAndSign(
   base64Tx: string,
   wallet: Awaited<ReturnType<typeof getTradingSigner>>,
   connection: ChainClient,
+  rpc: Parameters<typeof decompileTransactionMessageFetchingLookupTables>[1],
 ): Promise<{
   transaction: Awaited<ReturnType<typeof signTransactionMessageWithSigners>>;
 }> {
-  const rawBytes = Buffer.from(base64Tx, "base64");
+  const rawBytes = new Uint8Array(Buffer.from(base64Tx, "base64"));
 
   if (rawBytes.length > TX_SIZE_LIMIT_BYTES) {
     throw new Error(
@@ -754,27 +772,22 @@ async function deserializeAndSign(
     );
   }
 
-  // Re-sign with our key against a fresh blockhash before simulation and submission.
+  const decodedTx = getTransactionDecoder().decode(rawBytes);
+  const compiledMessage = getCompiledTransactionMessageDecoder().decode(decodedTx.messageBytes);
+  const hasAlts = ((compiledMessage as unknown as { addressTableLookups?: unknown[] }).addressTableLookups?.length ?? 0) > 0;
+  const txMessage = hasAlts
+    ? await decompileTransactionMessageFetchingLookupTables(compiledMessage, rpc)
+    : decompileTransactionMessage(compiledMessage, { addressesByLookupTableAddress: {} });
+
   const latestBlockhash = await connection.getLatestBlockhash("confirmed");
-
-  const { VersionedTransaction } = await import("@solana/web3.js");
-  const vt = VersionedTransaction.deserialize(rawBytes);
-  vt.message.recentBlockhash = latestBlockhash.blockhash;
-
-  const keyPair = await crypto.subtle.importKey(
-    "raw",
-    wallet.keyPair.privateKey instanceof CryptoKey
-      ? await crypto.subtle.exportKey("raw", wallet.keyPair.privateKey)
-      : wallet.keyPair.privateKey,
-    { name: "Ed25519" },
-    false,
-    ["sign"],
+  const updatedMessage = setTransactionMessageLifetimeUsingBlockhash(
+    { blockhash: latestBlockhash.blockhash, lastValidBlockHeight: BigInt(latestBlockhash.lastValidBlockHeight) },
+    setTransactionMessageFeePayerSigner(wallet, txMessage),
   );
-  const msgBytes = vt.message.serialize();
-  const sigBytes = await crypto.subtle.sign("Ed25519", keyPair, msgBytes);
-  vt.signatures[0] = new Uint8Array(sigBytes);
 
-  const signedBase64 = Buffer.from(vt.serialize()).toString("base64") as Base64EncodedWireTransaction;
+  const transaction = await signTransactionMessageWithSigners(updatedMessage);
+
+  const signedBase64 = getBase64EncodedWireTransaction(transaction);
 
   // Simulate with replaceRecentBlockhash so stale blockhashes don't cause false failures.
   const simulation = await connection.simulateTransaction(signedBase64);
@@ -782,14 +795,7 @@ async function deserializeAndSign(
     throw new Error(`swap simulation failed: ${JSON.stringify(simulation.err)}`);
   }
 
-  return {
-    transaction: {
-      [Symbol.for("@solana/kit/transaction")]: true,
-      messageBytes: msgBytes,
-      signatures: { [wallet.address]: vt.signatures[0] as unknown as import("@solana/kit").SignatureBytes },
-      _wireTransaction: signedBase64,
-    } as unknown as Awaited<ReturnType<typeof signTransactionMessageWithSigners>>,
-  };
+  return { transaction };
 }
 
 async function submitBuiltTransaction(input: {

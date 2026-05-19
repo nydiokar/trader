@@ -1,11 +1,14 @@
-import { generateKeyPairSigner } from "@solana/kit";
+﻿import {
+  generateKeyPairSigner,
+  getBase64EncodedWireTransaction,
+  pipe,
+  createTransactionMessage,
+  setTransactionMessageFeePayerSigner,
+  setTransactionMessageLifetimeUsingBlockhash,
+  signTransactionMessageWithSigners,
+  getSignatureFromTransaction,
+} from "@solana/kit";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-
-type TestJupiterInstruction = {
-  programId: string;
-  accounts: Array<{ pubkey: string; isSigner: boolean; isWritable: boolean }>;
-  data: string;
-};
 
 const upsertTrade = vi.fn();
 const findSignal = vi.fn();
@@ -66,27 +69,37 @@ function makeConfirmedTransaction(walletAddress: string, tokenMint: string) {
   };
 }
 
-function makeSwapInstructions(
-  overrides: Partial<ReturnType<typeof makeSwapInstructionsBase>> = {},
-) {
-  return {
-    ...makeSwapInstructionsBase(),
-    ...overrides,
-  };
+// Returns a fake swap response with a placeholder base64 tx string.
+// The real tx building/signing is done by buildSwapTx in deps.
+function makeSwapResponse() {
+  return { swapTransaction: "AAAA", lastValidBlockHeight: 55 };
 }
 
-function makeSwapInstructionsBase() {
-  return {
-    computeBudgetInstructions: [] as TestJupiterInstruction[],
-    otherInstructions: [] as TestJupiterInstruction[],
-    setupInstructions: [] as TestJupiterInstruction[],
-    swapInstruction: {
-      programId: "11111111111111111111111111111111",
-      accounts: [],
-      data: Buffer.alloc(0).toString("base64"),
-    },
-    cleanupInstruction: undefined,
-    addressLookupTableAddresses: [],
+// Builds a real signed versioned transaction using @solana/kit and calls connection.simulateTransaction.
+// This is the test stand-in for deserializeAndSign â€” it exercises the actual kit signing path
+// without needing Jupiter, RPC for ALTs, or a real base64 Jupiter tx.
+// Builds a real signed versioned transaction using @solana/kit and calls connection.simulateTransaction.
+// This is the test stand-in for deserializeAndSign — it exercises the actual kit signing path
+// without needing Jupiter, RPC for ALTs, or a real base64 Jupiter tx.
+function makeBuildSwapTx(wallet: Awaited<ReturnType<typeof generateKeyPairSigner>>) {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return async (_base64Tx: string, _w: unknown, connection: any) => {
+    const msg = pipe(
+      createTransactionMessage({ version: 0 }),
+      (m) => setTransactionMessageFeePayerSigner(wallet, m),
+      (m) =>
+        setTransactionMessageLifetimeUsingBlockhash(
+          { blockhash: "11111111111111111111111111111111" as import("@solana/kit").Blockhash, lastValidBlockHeight: 100n },
+          m,
+        ),
+    );
+    const transaction = await signTransactionMessageWithSigners(msg);
+    const base64 = getBase64EncodedWireTransaction(transaction);
+    const simulation = await connection.simulateTransaction(base64);
+    if (simulation.err) {
+      throw new Error(`swap simulation failed: ${JSON.stringify(simulation.err)}`);
+    }
+    return { transaction };
   };
 }
 
@@ -117,11 +130,12 @@ describe("M3 executor", () => {
       },
       {
         wallet,
+        buildSwapTx: makeBuildSwapTx(wallet),
         now: vi.fn().mockReturnValue(1_000),
         sleep: vi.fn().mockResolvedValue(undefined),
         quoteClient: {
           getQuote: vi.fn().mockResolvedValue(makeQuote()),
-          getSwapInstructions: vi.fn().mockResolvedValue(makeSwapInstructions()),
+          getSwap: vi.fn().mockResolvedValue(makeSwapResponse()),
         },
         priorityFeeClient: {
           getPriorityFeeEstimate: vi.fn().mockResolvedValue(12_345n),
@@ -131,7 +145,7 @@ describe("M3 executor", () => {
             blockhash: "11111111111111111111111111111111",
             lastValidBlockHeight: 55,
           }),
-          fetchLookupTableAddresses: vi.fn().mockResolvedValue({}),
+
           simulateTransaction: vi
             .fn()
             .mockResolvedValue({ err: null, unitsConsumed: 100_000n }),
@@ -192,11 +206,12 @@ describe("M3 executor", () => {
       },
       {
         wallet,
+        buildSwapTx: makeBuildSwapTx(wallet),
         now: vi.fn().mockReturnValue(1_000),
         sleep: vi.fn().mockResolvedValue(undefined),
         quoteClient: {
           getQuote: vi.fn().mockResolvedValue(makeQuote()),
-          getSwapInstructions: vi.fn().mockResolvedValue(makeSwapInstructions()),
+          getSwap: vi.fn().mockResolvedValue(makeSwapResponse()),
         },
         priorityFeeClient: {
           getPriorityFeeEstimate: vi.fn().mockResolvedValue(12_345n),
@@ -206,7 +221,7 @@ describe("M3 executor", () => {
             blockhash: "11111111111111111111111111111111",
             lastValidBlockHeight: 55,
           }),
-          fetchLookupTableAddresses: vi.fn().mockResolvedValue({}),
+
           simulateTransaction: vi
             .fn()
             .mockResolvedValue({ err: null, unitsConsumed: 100_000n }),
@@ -249,11 +264,12 @@ describe("M3 executor", () => {
       },
       {
         wallet,
+        buildSwapTx: makeBuildSwapTx(wallet),
         now: vi.fn().mockReturnValue(1_000),
         sleep: vi.fn().mockResolvedValue(undefined),
         quoteClient: {
           getQuote: vi.fn().mockResolvedValue(makeQuote()),
-          getSwapInstructions: vi.fn().mockResolvedValue(makeSwapInstructions()),
+          getSwap: vi.fn().mockResolvedValue(makeSwapResponse()),
         },
         priorityFeeClient: {
           getPriorityFeeEstimate: vi.fn().mockResolvedValue(12_345n),
@@ -263,7 +279,7 @@ describe("M3 executor", () => {
             blockhash: "11111111111111111111111111111111",
             lastValidBlockHeight: 55,
           }),
-          fetchLookupTableAddresses: vi.fn().mockResolvedValue({}),
+
           simulateTransaction: vi
             .fn()
             .mockResolvedValue({ err: null, unitsConsumed: 100_000n }),
@@ -326,11 +342,12 @@ describe("M3 executor", () => {
       },
       {
         wallet,
+        buildSwapTx: makeBuildSwapTx(wallet),
         now: vi.fn().mockReturnValue(1_000),
         sleep: vi.fn().mockResolvedValue(undefined),
         quoteClient: {
           getQuote: vi.fn().mockResolvedValue(makeQuote()),
-          getSwapInstructions: vi.fn().mockResolvedValue(makeSwapInstructions()),
+          getSwap: vi.fn().mockResolvedValue(makeSwapResponse()),
         },
         priorityFeeClient: {
           getPriorityFeeEstimate: vi.fn().mockResolvedValue(12_345n),
@@ -340,7 +357,7 @@ describe("M3 executor", () => {
             blockhash: "11111111111111111111111111111111",
             lastValidBlockHeight: 55,
           }),
-          fetchLookupTableAddresses: vi.fn().mockResolvedValue({}),
+
           simulateTransaction,
           sendTransaction,
           getSignatureStatuses,
@@ -391,11 +408,12 @@ describe("M3 executor", () => {
       },
       {
         wallet,
+        buildSwapTx: makeBuildSwapTx(wallet),
         now: vi.fn().mockReturnValue(1_000),
         sleep: vi.fn().mockResolvedValue(undefined),
         quoteClient: {
           getQuote: vi.fn().mockResolvedValue(makeQuote()),
-          getSwapInstructions: vi.fn().mockResolvedValue(makeSwapInstructions()),
+          getSwap: vi.fn().mockResolvedValue(makeSwapResponse()),
         },
         priorityFeeClient: {
           getPriorityFeeEstimate: vi.fn().mockResolvedValue(12_345n),
@@ -405,7 +423,7 @@ describe("M3 executor", () => {
             blockhash: "11111111111111111111111111111111",
             lastValidBlockHeight: 55,
           }),
-          fetchLookupTableAddresses: vi.fn().mockResolvedValue({}),
+
           simulateTransaction: vi
             .fn()
             .mockResolvedValue({ err: null, unitsConsumed: 100_000n }),
@@ -458,7 +476,7 @@ describe("M3 executor", () => {
         sleep: vi.fn().mockResolvedValue(undefined),
         quoteClient: {
           getQuote: vi.fn().mockResolvedValue(makeQuote()),
-          getSwapInstructions: vi.fn().mockResolvedValue(makeSwapInstructions()),
+          getSwap: vi.fn().mockResolvedValue(makeSwapResponse()),
         },
         priorityFeeClient: {
           getPriorityFeeEstimate: vi.fn().mockResolvedValue(12_345n),
@@ -468,7 +486,7 @@ describe("M3 executor", () => {
             blockhash: "11111111111111111111111111111111",
             lastValidBlockHeight: 10,
           }),
-          fetchLookupTableAddresses: vi.fn().mockResolvedValue({}),
+
           simulateTransaction: vi
             .fn()
             .mockResolvedValue({ err: null, unitsConsumed: 100_000n }),
@@ -517,14 +535,14 @@ describe("M3 executor", () => {
         sleep: vi.fn().mockResolvedValue(undefined),
         quoteClient: {
           getQuote: vi.fn().mockRejectedValue(new Error("quote unavailable")),
-          getSwapInstructions: vi.fn(),
+          getSwap: vi.fn(),
         },
         priorityFeeClient: {
           getPriorityFeeEstimate: vi.fn(),
         },
         connection: {
           getLatestBlockhash: vi.fn(),
-          fetchLookupTableAddresses: vi.fn(),
+
           simulateTransaction: vi.fn(),
           sendTransaction,
           getSignatureStatuses: vi.fn(),
@@ -571,7 +589,7 @@ describe("M3 executor", () => {
         sleep: vi.fn().mockResolvedValue(undefined),
         quoteClient: {
           getQuote: vi.fn().mockResolvedValue(makeQuote()),
-          getSwapInstructions: vi.fn().mockResolvedValue(makeSwapInstructions()),
+          getSwap: vi.fn().mockResolvedValue(makeSwapResponse()),
         },
         priorityFeeClient: {
           getPriorityFeeEstimate: vi.fn().mockResolvedValue(12_345n),
@@ -581,7 +599,7 @@ describe("M3 executor", () => {
             blockhash: "11111111111111111111111111111111",
             lastValidBlockHeight: 55,
           }),
-          fetchLookupTableAddresses: vi.fn().mockResolvedValue({}),
+
           simulateTransaction: vi
             .fn()
             .mockResolvedValue({ err: null, unitsConsumed: 100_000n }),
@@ -633,11 +651,12 @@ describe("M3 executor", () => {
       },
       {
         wallet,
+        buildSwapTx: makeBuildSwapTx(wallet),
         now: vi.fn().mockReturnValue(1_000),
         sleep: vi.fn().mockResolvedValue(undefined),
         quoteClient: {
           getQuote: vi.fn().mockResolvedValue(makeQuote()),
-          getSwapInstructions: vi.fn().mockResolvedValue(makeSwapInstructions()),
+          getSwap: vi.fn().mockResolvedValue(makeSwapResponse()),
         },
         priorityFeeClient: {
           getPriorityFeeEstimate: vi.fn().mockResolvedValue(12_345n),
@@ -647,7 +666,7 @@ describe("M3 executor", () => {
             blockhash: "11111111111111111111111111111111",
             lastValidBlockHeight: 55,
           }),
-          fetchLookupTableAddresses: vi.fn().mockResolvedValue({}),
+
           simulateTransaction: vi
             .fn()
             .mockResolvedValue({ err: null, unitsConsumed: 100_000n }),
@@ -698,11 +717,12 @@ describe("M3 executor", () => {
       },
       {
         wallet,
+        buildSwapTx: makeBuildSwapTx(wallet),
         now: vi.fn().mockReturnValue(1_000),
         sleep: vi.fn().mockResolvedValue(undefined),
         quoteClient: {
           getQuote: vi.fn().mockResolvedValue(makeQuote()),
-          getSwapInstructions: vi.fn().mockResolvedValue(makeSwapInstructions()),
+          getSwap: vi.fn().mockResolvedValue(makeSwapResponse()),
         },
         priorityFeeClient,
         connection: {
@@ -710,7 +730,7 @@ describe("M3 executor", () => {
             blockhash: "11111111111111111111111111111111",
             lastValidBlockHeight: 55,
           }),
-          fetchLookupTableAddresses: vi.fn().mockResolvedValue({}),
+
           simulateTransaction: vi
             .fn()
             .mockResolvedValue({ err: null, unitsConsumed: 100_000n }),
@@ -739,11 +759,11 @@ describe("M3 executor", () => {
     expect(priorityFeeCallOrder!).toBeLessThan(sendCallOrder!);
   });
 
-  it("ignores Jupiter compute-budget instructions because the executor owns CU limit and price", async () => {
+  it("passes priority fee to getSwap so Jupiter builds the tx with the right CU price", async () => {
     const { executeSignalWithDependencies } = await import("../src/executor/index.js");
     const wallet = await generateKeyPairSigner();
     const tokenMint = "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN";
-    const sendTransaction = vi.fn().mockResolvedValue("sig-confirmed");
+    const getSwap = vi.fn().mockResolvedValue(makeSwapResponse());
 
     await executeSignalWithDependencies(
       {
@@ -754,50 +774,31 @@ describe("M3 executor", () => {
       },
       {
         wallet,
+        buildSwapTx: makeBuildSwapTx(wallet),
         now: vi.fn().mockReturnValue(1_000),
         sleep: vi.fn().mockResolvedValue(undefined),
         quoteClient: {
           getQuote: vi.fn().mockResolvedValue(makeQuote()),
-          getSwapInstructions: vi.fn().mockResolvedValue(
-            makeSwapInstructions({
-              computeBudgetInstructions: [
-                {
-                  programId: "not-a-valid-public-key",
-                  accounts: [],
-                  data: Buffer.alloc(0).toString("base64"),
-                },
-              ],
-            }),
-          ),
+          getSwap,
         },
         priorityFeeClient: {
-          getPriorityFeeEstimate: vi.fn().mockResolvedValue(12_345n),
+          getPriorityFeeEstimate: vi.fn().mockResolvedValue(77_777n),
         },
         connection: {
           getLatestBlockhash: vi.fn().mockResolvedValue({
             blockhash: "11111111111111111111111111111111",
             lastValidBlockHeight: 55,
           }),
-          fetchLookupTableAddresses: vi.fn().mockResolvedValue({}),
-          simulateTransaction: vi
-            .fn()
-            .mockResolvedValue({ err: null, unitsConsumed: 100_000n }),
-          sendTransaction,
-          getSignatureStatuses: vi.fn().mockResolvedValue([
-            {
-              confirmationStatus: "confirmed",
-              err: null,
-            },
-          ]),
+          simulateTransaction: vi.fn().mockResolvedValue({ err: null, unitsConsumed: 100_000n }),
+          sendTransaction: vi.fn().mockResolvedValue("sig-confirmed"),
+          getSignatureStatuses: vi.fn().mockResolvedValue([{ confirmationStatus: "confirmed", err: null }]),
           getBlockHeight: vi.fn().mockResolvedValue(50),
-          getTransaction: vi
-            .fn()
-            .mockResolvedValue(makeConfirmedTransaction(wallet.address.toString(), tokenMint)),
+          getTransaction: vi.fn().mockResolvedValue(makeConfirmedTransaction(wallet.address.toString(), tokenMint)),
         },
       },
     );
 
-    expect(sendTransaction).toHaveBeenCalledOnce();
+    expect(getSwap).toHaveBeenCalledWith(expect.anything(), expect.any(String), 77_777);
   });
 
   it("treats priority fee failures as pre-submit failures", async () => {
@@ -817,7 +818,7 @@ describe("M3 executor", () => {
         sleep: vi.fn().mockResolvedValue(undefined),
         quoteClient: {
           getQuote: vi.fn().mockResolvedValue(makeQuote()),
-          getSwapInstructions: vi.fn().mockResolvedValue(makeSwapInstructions()),
+          getSwap: vi.fn().mockResolvedValue(makeSwapResponse()),
         },
         priorityFeeClient: {
           getPriorityFeeEstimate: vi
@@ -830,7 +831,7 @@ describe("M3 executor", () => {
             blockhash: "11111111111111111111111111111111",
             lastValidBlockHeight: 55,
           }),
-          fetchLookupTableAddresses: vi.fn().mockResolvedValue({}),
+
           simulateTransaction: vi.fn(),
           sendTransaction,
           getSignatureStatuses: vi.fn(),
@@ -877,7 +878,7 @@ describe("M3 executor", () => {
         sleep: vi.fn().mockResolvedValue(undefined),
         quoteClient: {
           getQuote: vi.fn().mockResolvedValue(makeQuote()),
-          getSwapInstructions: vi.fn().mockResolvedValue(makeSwapInstructions()),
+          getSwap: vi.fn().mockResolvedValue(makeSwapResponse()),
         },
         priorityFeeClient: {
           getPriorityFeeEstimate: vi.fn().mockResolvedValue(12_345n),
@@ -887,7 +888,7 @@ describe("M3 executor", () => {
             blockhash: "11111111111111111111111111111111",
             lastValidBlockHeight: 55,
           }),
-          fetchLookupTableAddresses: vi.fn().mockResolvedValue({}),
+
           simulateTransaction: vi
             .fn()
             .mockResolvedValue({ err: { InstructionError: [0, "Custom"] } }),
@@ -936,7 +937,7 @@ describe("M3 executor", () => {
         sleep: vi.fn().mockResolvedValue(undefined),
         quoteClient: {
           getQuote: vi.fn().mockResolvedValue(makeQuote()),
-          getSwapInstructions: vi.fn().mockResolvedValue(makeSwapInstructions()),
+          getSwap: vi.fn().mockResolvedValue(makeSwapResponse()),
         },
         priorityFeeClient: {
           getPriorityFeeEstimate: vi.fn().mockResolvedValue(12_345n),
@@ -946,7 +947,7 @@ describe("M3 executor", () => {
             blockhash: "11111111111111111111111111111111",
             lastValidBlockHeight: 55,
           }),
-          fetchLookupTableAddresses: vi.fn().mockResolvedValue({}),
+
           simulateTransaction: vi.fn().mockResolvedValue({ err: null }),
           sendTransaction,
           getSignatureStatuses: vi.fn(),
@@ -993,11 +994,12 @@ describe("M3 executor", () => {
       },
       {
         wallet,
+        buildSwapTx: makeBuildSwapTx(wallet),
         now: vi.fn().mockReturnValue(1_000),
         sleep: vi.fn().mockResolvedValue(undefined),
         quoteClient: {
           getQuote: vi.fn().mockResolvedValue(makeQuote()),
-          getSwapInstructions: vi.fn().mockResolvedValue(makeSwapInstructions()),
+          getSwap: vi.fn().mockResolvedValue(makeSwapResponse()),
         },
         priorityFeeClient: {
           getPriorityFeeEstimate: vi.fn().mockResolvedValue(12_345n),
@@ -1012,7 +1014,7 @@ describe("M3 executor", () => {
             blockhash: "11111111111111111111111111111111",
             lastValidBlockHeight: 55,
           }),
-          fetchLookupTableAddresses: vi.fn().mockResolvedValue({}),
+
           simulateTransaction: vi
             .fn()
             .mockResolvedValue({ err: null, unitsConsumed: 100_000n }),
@@ -1067,11 +1069,12 @@ describe("M3 executor", () => {
       },
       {
         wallet,
+        buildSwapTx: makeBuildSwapTx(wallet),
         now: vi.fn().mockReturnValue(1_000),
         sleep: vi.fn().mockResolvedValue(undefined),
         quoteClient: {
           getQuote: vi.fn().mockResolvedValue(makeQuote()),
-          getSwapInstructions: vi.fn().mockResolvedValue(makeSwapInstructions()),
+          getSwap: vi.fn().mockResolvedValue(makeSwapResponse()),
         },
         priorityFeeClient: {
           getPriorityFeeEstimate: vi.fn().mockResolvedValue(12_345n),
@@ -1087,7 +1090,7 @@ describe("M3 executor", () => {
             blockhash: "11111111111111111111111111111111",
             lastValidBlockHeight: 55,
           }),
-          fetchLookupTableAddresses: vi.fn().mockResolvedValue({}),
+
           simulateTransaction: vi
             .fn()
             .mockResolvedValue({ err: null, unitsConsumed: 100_000n }),
@@ -1145,11 +1148,12 @@ describe("M3 executor", () => {
       },
       {
         wallet,
+        buildSwapTx: makeBuildSwapTx(wallet),
         now: vi.fn().mockReturnValue(1_000),
         sleep: vi.fn().mockResolvedValue(undefined),
         quoteClient: {
           getQuote: vi.fn().mockResolvedValue(makeQuote()),
-          getSwapInstructions: vi.fn().mockResolvedValue(makeSwapInstructions()),
+          getSwap: vi.fn().mockResolvedValue(makeSwapResponse()),
         },
         priorityFeeClient: {
           getPriorityFeeEstimate: vi.fn().mockResolvedValue(12_345n),
@@ -1163,7 +1167,7 @@ describe("M3 executor", () => {
             blockhash: "11111111111111111111111111111111",
             lastValidBlockHeight: 55,
           }),
-          fetchLookupTableAddresses: vi.fn().mockResolvedValue({}),
+
           simulateTransaction: vi
             .fn()
             .mockResolvedValue({ err: null, unitsConsumed: 100_000n }),
@@ -1209,11 +1213,12 @@ describe("M3 executor", () => {
       },
       {
         wallet,
+        buildSwapTx: makeBuildSwapTx(wallet),
         now: vi.fn().mockReturnValue(1_000),
         sleep: vi.fn().mockResolvedValue(undefined),
         quoteClient: {
           getQuote: vi.fn().mockResolvedValue(makeQuote()),
-          getSwapInstructions: vi.fn().mockResolvedValue(makeSwapInstructions()),
+          getSwap: vi.fn().mockResolvedValue(makeSwapResponse()),
         },
         priorityFeeClient: {
           getPriorityFeeEstimate: vi.fn().mockResolvedValue(12_345n),
@@ -1229,7 +1234,7 @@ describe("M3 executor", () => {
             blockhash: "11111111111111111111111111111111",
             lastValidBlockHeight: 55,
           }),
-          fetchLookupTableAddresses: vi.fn().mockResolvedValue({}),
+
           simulateTransaction: vi
             .fn()
             .mockResolvedValue({ err: null, unitsConsumed: 100_000n }),
@@ -1277,13 +1282,14 @@ describe("M3 executor", () => {
       },
       {
         wallet,
+        buildSwapTx: makeBuildSwapTx(wallet),
         now: vi.fn(() => currentTime),
         sleep: vi.fn().mockImplementation(async () => {
           currentTime += 46_000;
         }),
         quoteClient: {
           getQuote: vi.fn().mockResolvedValue(makeQuote()),
-          getSwapInstructions: vi.fn().mockResolvedValue(makeSwapInstructions()),
+          getSwap: vi.fn().mockResolvedValue(makeSwapResponse()),
         },
         priorityFeeClient: {
           getPriorityFeeEstimate: vi.fn().mockResolvedValue(12_345n),
@@ -1297,7 +1303,7 @@ describe("M3 executor", () => {
             blockhash: "11111111111111111111111111111111",
             lastValidBlockHeight: 55,
           }),
-          fetchLookupTableAddresses: vi.fn().mockResolvedValue({}),
+
           simulateTransaction: vi
             .fn()
             .mockResolvedValue({ err: null, unitsConsumed: 100_000n }),
@@ -1341,16 +1347,17 @@ describe("M3 executor", () => {
       },
       {
         wallet,
+        buildSwapTx: makeBuildSwapTx(wallet),
         now: vi.fn().mockReturnValue(1_000),
         sleep: vi.fn().mockResolvedValue(undefined),
         quoteClient: {
           getQuote: vi.fn().mockResolvedValue(makeQuote()),
-          getSwapInstructions: vi.fn().mockResolvedValue(makeSwapInstructions()),
+          getSwap: vi.fn().mockResolvedValue(makeSwapResponse()),
         },
         priorityFeeClient: { getPriorityFeeEstimate: vi.fn().mockResolvedValue(12_345n) },
         connection: {
           getLatestBlockhash: vi.fn().mockResolvedValue({ blockhash: "11111111111111111111111111111111", lastValidBlockHeight: 55 }),
-          fetchLookupTableAddresses: vi.fn().mockResolvedValue({}),
+
           simulateTransaction: vi.fn().mockResolvedValue({ err: null, unitsConsumed: 100_000n }),
           sendTransaction: vi.fn().mockResolvedValue("sig-sol-recon"),
           getSignatureStatuses: vi.fn().mockResolvedValue([{ confirmationStatus: "confirmed", err: null }]),
@@ -1369,7 +1376,7 @@ describe("M3 executor", () => {
       },
     );
 
-    // pre=20e9 post=19_989_995_000 fee=5000 → delta=10_000_000 lamports = 0.01 SOL
+    // pre=20e9 post=19_989_995_000 fee=5000 â†’ delta=10_000_000 lamports = 0.01 SOL
     expect(upsertTrade).toHaveBeenCalledWith(
       expect.objectContaining({
         create: expect.objectContaining({
@@ -1395,16 +1402,17 @@ describe("M3 executor", () => {
       },
       {
         wallet,
+        buildSwapTx: makeBuildSwapTx(wallet),
         now: vi.fn().mockReturnValue(1_000),
         sleep: vi.fn().mockResolvedValue(undefined),
         quoteClient: {
           getQuote: vi.fn().mockResolvedValue(makeQuote()),
-          getSwapInstructions: vi.fn().mockResolvedValue(makeSwapInstructions()),
+          getSwap: vi.fn().mockResolvedValue(makeSwapResponse()),
         },
         priorityFeeClient: { getPriorityFeeEstimate: vi.fn().mockResolvedValue(12_345n) },
         connection: {
           getLatestBlockhash: vi.fn().mockResolvedValue({ blockhash: "11111111111111111111111111111111", lastValidBlockHeight: 55 }),
-          fetchLookupTableAddresses: vi.fn().mockResolvedValue({}),
+
           simulateTransaction: vi.fn().mockResolvedValue({ err: null, unitsConsumed: 100_000n }),
           sendTransaction: vi.fn().mockResolvedValue("sig-bigint-sol-recon"),
           getSignatureStatuses: vi.fn().mockResolvedValue([{ confirmationStatus: "confirmed", err: null }]),
@@ -1448,16 +1456,17 @@ describe("M3 executor", () => {
       },
       {
         wallet,
+        buildSwapTx: makeBuildSwapTx(wallet),
         now: vi.fn().mockReturnValue(1_000),
         sleep: vi.fn().mockResolvedValue(undefined),
         quoteClient: {
           getQuote: vi.fn().mockResolvedValue(makeQuote()),
-          getSwapInstructions: vi.fn().mockResolvedValue(makeSwapInstructions()),
+          getSwap: vi.fn().mockResolvedValue(makeSwapResponse()),
         },
         priorityFeeClient: { getPriorityFeeEstimate: vi.fn().mockResolvedValue(12_345n) },
         connection: {
           getLatestBlockhash: vi.fn().mockResolvedValue({ blockhash: "11111111111111111111111111111111", lastValidBlockHeight: 55 }),
-          fetchLookupTableAddresses: vi.fn().mockResolvedValue({}),
+
           simulateTransaction: vi.fn().mockResolvedValue({ err: null, unitsConsumed: 100_000n }),
           sendTransaction: vi.fn().mockResolvedValue("sig-no-wallet"),
           getSignatureStatuses: vi.fn().mockResolvedValue([{ confirmationStatus: "confirmed", err: null }]),
@@ -1501,16 +1510,17 @@ describe("M3 executor", () => {
       },
       {
         wallet,
+        buildSwapTx: makeBuildSwapTx(wallet),
         now: vi.fn().mockReturnValue(1_000),
         sleep: vi.fn().mockResolvedValue(undefined),
         quoteClient: {
           getQuote: vi.fn().mockResolvedValue(makeQuote()),
-          getSwapInstructions: vi.fn().mockResolvedValue(makeSwapInstructions()),
+          getSwap: vi.fn().mockResolvedValue(makeSwapResponse()),
         },
         priorityFeeClient: { getPriorityFeeEstimate: vi.fn().mockResolvedValue(12_345n) },
         connection: {
           getLatestBlockhash: vi.fn().mockResolvedValue({ blockhash: "11111111111111111111111111111111", lastValidBlockHeight: 55 }),
-          fetchLookupTableAddresses: vi.fn().mockResolvedValue({}),
+
           simulateTransaction: vi.fn().mockResolvedValue({ err: null, unitsConsumed: 100_000n }),
           sendTransaction: vi.fn().mockResolvedValue("sig-no-balances"),
           getSignatureStatuses: vi.fn().mockResolvedValue([{ confirmationStatus: "confirmed", err: null }]),
@@ -1550,7 +1560,7 @@ describe("Executor Telegram notifications", () => {
   function makeBaseConnection(overrides: Record<string, unknown> = {}) {
     return {
       getLatestBlockhash: vi.fn().mockResolvedValue({ blockhash: "11111111111111111111111111111111", lastValidBlockHeight: 55 }),
-      fetchLookupTableAddresses: vi.fn().mockResolvedValue({}),
+
       simulateTransaction: vi.fn().mockResolvedValue({ err: null, unitsConsumed: 100_000n }),
       sendTransaction: vi.fn().mockResolvedValue("sig-ok"),
       getSignatureStatuses: vi.fn().mockResolvedValue([{ confirmationStatus: "confirmed", err: null }]),
@@ -1573,7 +1583,7 @@ describe("Executor Telegram notifications", () => {
         notify: notifyFn,
         now: vi.fn().mockReturnValue(1_000),
         sleep: vi.fn().mockResolvedValue(undefined),
-        quoteClient: { getQuote: vi.fn().mockResolvedValue(makeQuote()), getSwapInstructions: vi.fn().mockResolvedValue(makeSwapInstructions()) },
+        quoteClient: { getQuote: vi.fn().mockResolvedValue(makeQuote()), getSwap: vi.fn().mockResolvedValue(makeSwapResponse()) },
         priorityFeeClient: { getPriorityFeeEstimate: vi.fn().mockResolvedValue(12_345n) },
         connection: makeBaseConnection({
           getSignatureStatuses: vi.fn().mockResolvedValue([{ confirmationStatus: "confirmed", err: null }]),
@@ -1597,7 +1607,7 @@ describe("Executor Telegram notifications", () => {
         notify: notifyFn,
         now: vi.fn().mockReturnValue(1_000),
         sleep: vi.fn().mockResolvedValue(undefined),
-        quoteClient: { getQuote: vi.fn().mockResolvedValue(makeQuote()), getSwapInstructions: vi.fn().mockResolvedValue(makeSwapInstructions()) },
+        quoteClient: { getQuote: vi.fn().mockResolvedValue(makeQuote()), getSwap: vi.fn().mockResolvedValue(makeSwapResponse()) },
         priorityFeeClient: { getPriorityFeeEstimate: vi.fn().mockResolvedValue(12_345n) },
         connection: makeBaseConnection({
           getSignatureStatuses: vi.fn().mockResolvedValue([null]),
@@ -1624,7 +1634,7 @@ describe("Executor Telegram notifications", () => {
         notify: notifyFn,
         now: vi.fn(() => currentTime),
         sleep: vi.fn().mockImplementation(async () => { currentTime += 46_000; }),
-        quoteClient: { getQuote: vi.fn().mockResolvedValue(makeQuote()), getSwapInstructions: vi.fn().mockResolvedValue(makeSwapInstructions()) },
+        quoteClient: { getQuote: vi.fn().mockResolvedValue(makeQuote()), getSwap: vi.fn().mockResolvedValue(makeSwapResponse()) },
         priorityFeeClient: { getPriorityFeeEstimate: vi.fn().mockResolvedValue(12_345n) },
         connection: makeBaseConnection({
           getSignatureStatuses: vi.fn().mockResolvedValue([null]),
@@ -1649,7 +1659,7 @@ describe("Executor Telegram notifications", () => {
         notify: notifyFn,
         now: vi.fn().mockReturnValue(1_000),
         sleep: vi.fn().mockResolvedValue(undefined),
-        quoteClient: { getQuote: vi.fn().mockRejectedValue(new Error("quote unavailable")), getSwapInstructions: vi.fn() },
+        quoteClient: { getQuote: vi.fn().mockRejectedValue(new Error("quote unavailable")), getSwap: vi.fn() },
         priorityFeeClient: { getPriorityFeeEstimate: vi.fn() },
         connection: makeBaseConnection(),
       },
@@ -1658,7 +1668,7 @@ describe("Executor Telegram notifications", () => {
     expect(notifyFn).not.toHaveBeenCalled();
   });
 
-  it("Telegram failure is non-fatal — trade is still persisted", async () => {
+  it("Telegram failure is non-fatal â€” trade is still persisted", async () => {
     const { executeSignalWithDependencies } = await import("../src/executor/index.js");
     const wallet = await generateKeyPairSigner();
     const tokenMint = "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN";
@@ -1671,7 +1681,7 @@ describe("Executor Telegram notifications", () => {
         notify: notifyFn,
         now: vi.fn().mockReturnValue(1_000),
         sleep: vi.fn().mockResolvedValue(undefined),
-        quoteClient: { getQuote: vi.fn().mockResolvedValue(makeQuote()), getSwapInstructions: vi.fn().mockResolvedValue(makeSwapInstructions()) },
+        quoteClient: { getQuote: vi.fn().mockResolvedValue(makeQuote()), getSwap: vi.fn().mockResolvedValue(makeSwapResponse()) },
         priorityFeeClient: { getPriorityFeeEstimate: vi.fn().mockResolvedValue(12_345n) },
         connection: makeBaseConnection({
           getTransaction: vi.fn().mockResolvedValue(makeConfirmedTransaction(wallet.address.toString(), tokenMint)),

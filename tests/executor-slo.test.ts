@@ -1,4 +1,13 @@
-import { generateKeyPairSigner } from "@solana/kit";
+﻿import {
+  generateKeyPairSigner,
+  getBase64EncodedWireTransaction,
+  pipe,
+  createTransactionMessage,
+  setTransactionMessageFeePayerSigner,
+  setTransactionMessageLifetimeUsingBlockhash,
+  signTransactionMessageWithSigners,
+  type Blockhash,
+} from "@solana/kit";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const upsertTrade = vi.fn();
@@ -31,25 +40,34 @@ function makeQuote() {
   };
 }
 
-function makeSwapInstructions() {
-  return {
-    computeBudgetInstructions: [],
-    otherInstructions: [],
-    setupInstructions: [],
-    swapInstruction: {
-      programId: "11111111111111111111111111111111",
-      accounts: [],
-      data: Buffer.alloc(0).toString("base64"),
-    },
-    cleanupInstruction: undefined,
-    addressLookupTableAddresses: [],
+function makeSwapResponse() {
+  return { swapTransaction: "AAAA", lastValidBlockHeight: 55 };
+}
+
+function makeBuildSwapTx(wallet: Awaited<ReturnType<typeof generateKeyPairSigner>>) {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return async (_base64Tx: string, _w: unknown, connection: any) => {
+    const msg = pipe(
+      createTransactionMessage({ version: 0 }),
+      (m) => setTransactionMessageFeePayerSigner(wallet, m),
+      (m) => setTransactionMessageLifetimeUsingBlockhash(
+        { blockhash: "11111111111111111111111111111111" as Blockhash, lastValidBlockHeight: 100n },
+        m,
+      ),
+    );
+    const transaction = await signTransactionMessageWithSigners(msg);
+    const base64 = getBase64EncodedWireTransaction(transaction);
+    const simulation = await connection.simulateTransaction(base64);
+    if (simulation.err) {
+      throw new Error(`swap simulation failed: ${JSON.stringify(simulation.err)}`);
+    }
+    return { transaction };
   };
 }
 
 function makeBaseConnection(walletAddress: string, tokenMint: string) {
   return {
     getLatestBlockhash: vi.fn().mockResolvedValue({ blockhash: "11111111111111111111111111111111", lastValidBlockHeight: 55 }),
-    fetchLookupTableAddresses: vi.fn().mockResolvedValue({}),
     simulateTransaction: vi.fn().mockResolvedValue({ err: null, unitsConsumed: 100_000n }),
     sendTransaction: vi.fn().mockResolvedValue("sig-ok"),
     getSignatureStatuses: vi.fn().mockResolvedValue([{ confirmationStatus: "confirmed", err: null }]),
@@ -91,12 +109,13 @@ describe("SLO evaluator wired to executor outcomes", () => {
       { signalId: "s1s1s1s1-s1s1-4s1s-8s1s-s1s1s1s1s1s1", tokenMint, amountSol: 0.01, maxSlippageBps: 300 },
       {
         wallet,
+        buildSwapTx: makeBuildSwapTx(wallet),
         notify: notifyFn,
         querySloWindow,
         sloWindowHours: 1,
         now: vi.fn().mockReturnValue(1_000),
         sleep: vi.fn().mockResolvedValue(undefined),
-        quoteClient: { getQuote: vi.fn().mockResolvedValue(makeQuote()), getSwapInstructions: vi.fn().mockResolvedValue(makeSwapInstructions()) },
+        quoteClient: { getQuote: vi.fn().mockResolvedValue(makeQuote()), getSwap: vi.fn().mockResolvedValue(makeSwapResponse()) },
         priorityFeeClient: { getPriorityFeeEstimate: vi.fn().mockResolvedValue(12_345n) },
         connection: makeBaseConnection(wallet.address.toString(), tokenMint),
       },
@@ -113,7 +132,7 @@ describe("SLO evaluator wired to executor outcomes", () => {
     const wallet = await generateKeyPairSigner();
     const tokenMint = "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN";
     const notifyFn = vi.fn().mockResolvedValue(undefined);
-    // 60 submitted, only 30 confirmed → landing rate 50% < 90% threshold
+    // 60 submitted, only 30 confirmed â†’ landing rate 50% < 90% threshold
     const querySloWindow = vi.fn().mockResolvedValue({
       submitted: 60,
       confirmed: 30,
@@ -124,12 +143,13 @@ describe("SLO evaluator wired to executor outcomes", () => {
       { signalId: "s2s2s2s2-s2s2-4s2s-8s2s-s2s2s2s2s2s2", tokenMint, amountSol: 0.01, maxSlippageBps: 300 },
       {
         wallet,
+        buildSwapTx: makeBuildSwapTx(wallet),
         notify: notifyFn,
         querySloWindow,
         sloWindowHours: 1,
         now: vi.fn().mockReturnValue(1_000),
         sleep: vi.fn().mockResolvedValue(undefined),
-        quoteClient: { getQuote: vi.fn().mockResolvedValue(makeQuote()), getSwapInstructions: vi.fn().mockResolvedValue(makeSwapInstructions()) },
+        quoteClient: { getQuote: vi.fn().mockResolvedValue(makeQuote()), getSwap: vi.fn().mockResolvedValue(makeSwapResponse()) },
         priorityFeeClient: { getPriorityFeeEstimate: vi.fn().mockResolvedValue(12_345n) },
         connection: makeBaseConnection(wallet.address.toString(), tokenMint),
       },
@@ -158,12 +178,13 @@ describe("SLO evaluator wired to executor outcomes", () => {
       { signalId: "s3s3s3s3-s3s3-4s3s-8s3s-s3s3s3s3s3s3", tokenMint, amountSol: 0.01, maxSlippageBps: 300 },
       {
         wallet,
+        buildSwapTx: makeBuildSwapTx(wallet),
         notify: notifyFn,
         querySloWindow,
         sloWindowHours: 1,
         now: vi.fn().mockReturnValue(1_000),
         sleep: vi.fn().mockResolvedValue(undefined),
-        quoteClient: { getQuote: vi.fn().mockResolvedValue(makeQuote()), getSwapInstructions: vi.fn().mockResolvedValue(makeSwapInstructions()) },
+        quoteClient: { getQuote: vi.fn().mockResolvedValue(makeQuote()), getSwap: vi.fn().mockResolvedValue(makeSwapResponse()) },
         priorityFeeClient: { getPriorityFeeEstimate: vi.fn().mockResolvedValue(12_345n) },
         connection: makeBaseConnection(wallet.address.toString(), tokenMint),
       },
@@ -173,7 +194,7 @@ describe("SLO evaluator wired to executor outcomes", () => {
     expect(messages.some((m) => m.includes("p95"))).toBe(true);
   });
 
-  it("SLO query failure is non-fatal — trade still completes", async () => {
+  it("SLO query failure is non-fatal â€” trade still completes", async () => {
     const { executeSignalWithDependencies } = await import("../src/executor/index.js");
     const wallet = await generateKeyPairSigner();
     const tokenMint = "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN";
@@ -183,11 +204,12 @@ describe("SLO evaluator wired to executor outcomes", () => {
       { signalId: "s4s4s4s4-s4s4-4s4s-8s4s-s4s4s4s4s4s4", tokenMint, amountSol: 0.01, maxSlippageBps: 300 },
       {
         wallet,
+        buildSwapTx: makeBuildSwapTx(wallet),
         querySloWindow,
         sloWindowHours: 1,
         now: vi.fn().mockReturnValue(1_000),
         sleep: vi.fn().mockResolvedValue(undefined),
-        quoteClient: { getQuote: vi.fn().mockResolvedValue(makeQuote()), getSwapInstructions: vi.fn().mockResolvedValue(makeSwapInstructions()) },
+        quoteClient: { getQuote: vi.fn().mockResolvedValue(makeQuote()), getSwap: vi.fn().mockResolvedValue(makeSwapResponse()) },
         priorityFeeClient: { getPriorityFeeEstimate: vi.fn().mockResolvedValue(12_345n) },
         connection: makeBaseConnection(wallet.address.toString(), tokenMint),
       },
@@ -210,11 +232,12 @@ describe("SLO evaluator wired to executor outcomes", () => {
       { signalId: "s5s5s5s5-s5s5-4s5s-8s5s-s5s5s5s5s5s5", tokenMint, amountSol: 0.01, maxSlippageBps: 300 },
       {
         wallet,
+        buildSwapTx: makeBuildSwapTx(wallet),
         querySloWindow,
         sloWindowHours: 2,
         now: vi.fn().mockReturnValue(nowMs),
         sleep: vi.fn().mockResolvedValue(undefined),
-        quoteClient: { getQuote: vi.fn().mockResolvedValue(makeQuote()), getSwapInstructions: vi.fn().mockResolvedValue(makeSwapInstructions()) },
+        quoteClient: { getQuote: vi.fn().mockResolvedValue(makeQuote()), getSwap: vi.fn().mockResolvedValue(makeSwapResponse()) },
         priorityFeeClient: { getPriorityFeeEstimate: vi.fn().mockResolvedValue(12_345n) },
         connection: makeBaseConnection(wallet.address.toString(), tokenMint),
       },

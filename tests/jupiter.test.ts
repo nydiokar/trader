@@ -1,12 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const quoteGet = vi.fn();
-const swapInstructionsPost = vi.fn();
+const swapPost = vi.fn();
 
 vi.mock("@jup-ag/api", () => ({
   createJupiterApiClient: vi.fn(() => ({
     quoteGet,
-    swapInstructionsPost,
+    swapPost,
   })),
 }));
 
@@ -92,41 +92,36 @@ describe("Jupiter client", () => {
     });
   });
 
-  it("requests swap instructions with the quote response and wallet public key", async () => {
+  it("requests a swap transaction with the quote, wallet key, and priority fee", async () => {
     quoteGet.mockResolvedValueOnce(makeQuote());
-    swapInstructionsPost.mockResolvedValueOnce({
-      otherInstructions: [],
-      computeBudgetInstructions: [],
-      setupInstructions: [],
-      swapInstruction: {
-        programId: "11111111111111111111111111111111",
-        accounts: [],
-        data: "",
-      },
-      addressLookupTableAddresses: [],
+    swapPost.mockResolvedValueOnce({
+      swapTransaction: "AAABBBCCC",
+      lastValidBlockHeight: 12345,
     });
 
-    const { getQuote, getSwapInstructions } = await import("../src/executor/jupiter.js");
+    const { getQuote, getSwap } = await import("../src/executor/jupiter.js");
     const quote = await getQuote(
       "DezXAZ8z7PnrnRJjz3wXBoRgixCa6aR37YaB3UQwB263",
       0.1,
       300,
     );
 
-    const instructions = await getSwapInstructions(
+    const response = await getSwap(
       quote,
       "7YttLkHDoD4TqVuTrSxkb6hG1Qz2mYv4mS4x2QVFGk3A",
+      77_777,
     );
 
-    expect(instructions.swapInstruction.programId).toBe(
-      "11111111111111111111111111111111",
-    );
-    expect(swapInstructionsPost).toHaveBeenCalledWith({
+    expect(response.swapTransaction).toBe("AAABBBCCC");
+    expect(response.lastValidBlockHeight).toBe(12345);
+    expect(swapPost).toHaveBeenCalledWith({
       swapRequest: {
         userPublicKey: "7YttLkHDoD4TqVuTrSxkb6hG1Qz2mYv4mS4x2QVFGk3A",
         quoteResponse: quote,
         wrapAndUnwrapSol: true,
         asLegacyTransaction: false,
+        computeUnitPriceMicroLamports: 77_777,
+        dynamicComputeUnitLimit: true,
       },
     });
   });
