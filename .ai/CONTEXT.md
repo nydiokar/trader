@@ -1,6 +1,6 @@
 # Trader Bot - Project Context
 
-**Branch:** `main` | **Last Updated:** 2026-05-18 | **Status:** M0-M3 complete. M4-M5 core executor implemented with deterministic coverage; M6-M7 partially implemented; Flow-to-bot dry-run bridge Stages 1-5 complete for production dry-run observability; Stage 6 live-readiness recheck evaluator implemented; live trading is fact — full buy→registry→exit→sell loop is live as of 2026-05-18.
+**Branch:** `main` | **Last Updated:** 2026-05-19 | **Status:** M0-M3 complete. M4-M5 core executor implemented with deterministic coverage; M6 implemented; M7 Telegram fully wired; Flow-to-bot dry-run bridge complete through Stage 8; full buy→registry→exit→sell loop live as of 2026-05-18; sell reconciliation and event-driven exit push live as of 2026-05-19.
 
 ---
 
@@ -33,7 +33,7 @@ Canonical spec: `solana-signal-bot-spec-v2.md`
 | M4 | Mainnet production executor | 3 days | **In progress** | >= 90% landing rate, p95 <= 15s, zero double-spends, all metrics populated |
 | M5 | Jito integration | 2 days | **Implemented, live blocked** | >= 95% landing rate, p95 <= 10s, fallback path tested, UNCERTAIN state proven safe |
 | M6 | Risk layer | 1 day | **Partially implemented** | Every blocker has a test; kill switch verified in prod |
-| M7 | Observability | 0.5 day | **Partially implemented** | All Telegram event types verified in staging |
+| M7 | Observability | 0.5 day | **Implemented** | All lifecycle Telegram events wired; staging verification pending real bot token |
 | M8 | Canary period | 1 week calendar | **Not started** | 5-7 days live with tiny caps, no UNCERTAIN states, >= 95% landing |
 | M9 | Production size-up | Ongoing | **Not started** | One full week at target size with SLOs met |
 
@@ -77,7 +77,7 @@ Target production architecture:
 
 **Stage 7: Done** — live buying is active at tiny capital via Flow → `/signal`.
 
-**Stage 8: Done** — full loop is live: buy confirms → `POST /positions/open` → Flow registry → ExitMonitor fires trail70 → `exit_pending` → FlowExitPoller picks up → `executeTokenSell()` → sell confirmed → `POST /positions/close` → Flow registry closed. First two live sell signatures confirmed 2026-05-18. Runtime: `sell_execution_enabled=true`.
+**Stage 8: Done** — full loop is live: buy confirms → `POST /positions/open` → Flow registry → ExitMonitor fires trail70 → pushes directly to `POST /flow/exit` (event-driven, primary path) → `executeTokenSell()` → sell confirmed → `POST /positions/close` with `sell_signature`, `sell_sol_received`, `sell_token_amount_raw`, `sell_submitted_via` → Flow registry closed. First two live sell signatures confirmed 2026-05-18. Exit poller demoted to 5-minute safety-net for missed pushes (trader restart, network blip). Runtime: `sell_execution_enabled=true`. Schema: `sol_received` column on `flow_exit_execution` (migration 20260518120000).
 
 **Stage 9: Not started** — end-to-end production canary and size-up.
 
@@ -120,9 +120,11 @@ All code is implemented. The loop has never completed end-to-end. Zero rows in `
 **Loop is live as of 2026-05-18.** All tasks complete:
 - [x] Live signals consistently include `entry_price_usd` and `planned_exit_policy_label` — `positionFeedback` is always populated.
 - [x] Confirmed buys produce rows in `tokens_ingest open_positions` — registry was already populating correctly.
-- [x] `FLOW_EXIT_POLL_ENABLED=true` in `.env`; poller runs every 30s with `dry_run:false`.
-- [x] ExitMonitor fires trail70 rule and marks positions `exit_pending`; bot picks up within 30s.
+- [x] ExitMonitor fires trail70 rule and pushes directly to `POST /flow/exit` (event-driven, primary path, no poll latency).
+- [x] Exit poller demoted to 5-minute safety-net only; does not fire on startup, only on interval tick.
 - [x] `sell_execution_enabled=true` in runtime_settings; sells executing and confirmed on-chain.
+- [x] Sell reconciliation: `reconcileSolReceivedFromSell()` reads wallet pre/post SOL from confirmed tx; persisted as `sol_received` on `flow_exit_execution`.
+- [x] `POST /positions/close` carries full sell metadata: signature, SOL received, token amount, submission path.
 
 ---
 
@@ -167,10 +169,13 @@ M4 task scaffold: `.ai/milestones/M4.md`
 - [ ] **[MUST]** Read-only RPC rate limiter with 429 backoff and jitter for tripwire data fetches.
 
 **M7 Observability:**
-- [x] Telegram posting helper; formatted messages for confirmed, failed, rejected, uncertain, kill-switch, low-wallet-balance.
+- [x] Telegram posting helper; HTML-formatted messages with emoji, Solscan links, `<code>` mint blocks.
 - [x] SLO alert evaluator; runs after each terminal trade write, posts Telegram alert on breach.
 - [x] Telegram wired to confirmed/failed_onchain/expired/uncertain executor outcomes via `safeNotify`.
-- [ ] Staging verification that every Telegram event type arrives (requires real trades).
+- [x] Signal lifecycle notifications: `formatSignalReceived` (fires only after all risk checks pass), `formatSignalRejected` (all blocker reasons + signal_stale + tripwire-as-blocker), `formatTripwiresWarning` (soft tripwire proceed).
+- [x] Exit lifecycle notifications: `formatExitTriggered` (on actual sell attempt), `formatExitConfirmed`, `formatExitFailed` (sell disabled, zero balance, tx failed).
+- [x] Bot token and chat ID are env-var driven (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`); dedicate one bot per project to prevent cross-project contamination.
+- [ ] Staging verification that every Telegram event type arrives (requires dedicated bot token in `.env`).
 - [ ] **[MUST]** Wire Telegram alerts for Flow dry-run accepted, rejected, invalid payload, and processing error outcomes.
 
 **M5 rate limiter (Stage 5 MUST):**
@@ -180,7 +185,7 @@ M4 task scaffold: `.ai/milestones/M4.md`
 
 ## Current Operating Reality
 
-- `pnpm build` and `pnpm test` pass (73 passed, 3 skipped as of 2026-05-15).
+- `pnpm build` and `pnpm test` pass (134 passed, 2 skipped as of 2026-05-19).
 - Deterministic-only tests; live mainnet buys via `pnpm canary:buy`, not Vitest.
 - `pnpm start` applies migrations before serving; startup validates `execution_journal`, `flow_dry_run_attempt`, wallet/RPC readiness before binding HTTP server.
 - Executor distinguishes `pre_submit_failed` (no signature) from post-signing uncertainty and `failed_onchain`.
