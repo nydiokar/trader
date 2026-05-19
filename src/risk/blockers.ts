@@ -3,6 +3,7 @@ import { db } from "../db/index.js";
 import { dailySpendSol, killSwitchGauge, walletSolBalance } from "../metrics/registry.js";
 import { getLiveSettings } from "../runtime/live-settings.js";
 import { getSolanaRpc, getTradingSigner } from "../solana/runtime.js";
+import { logger } from "../logger.js";
 
 // Spec 4.1 - pre-trade blockers.
 export type BlockerResult =
@@ -20,11 +21,13 @@ type BlockerDependencies = {
     FEE_BUFFER_SOL?: number;
     LIVE_EXECUTION_ENABLED?: boolean;
     REQUIRE_LIVE_EXECUTION_ENABLED?: boolean;
+    MAX_TRADES_PER_DAY?: number;
   };
   now(): number;
   getWalletSol(): Promise<number>;
   getDbKillSwitch(): Promise<boolean>;
   getDailySpendSol(startOfDaySeconds: number): Promise<number>;
+  getDailyTradeCount(startOfDaySeconds: number): Promise<number>;
   getLastTradeCreatedAt(tokenMint: string): Promise<number | null>;
   isBlocklisted(tokenMint: string): Promise<boolean>;
 };
@@ -67,6 +70,14 @@ export async function runBlockersWithDependencies(
     return { blocked: true, reason: "daily_cap" };
   }
 
+  if (deps.config.MAX_TRADES_PER_DAY !== undefined) {
+    const tradeCountToday = await deps.getDailyTradeCount(startOfDaySeconds);
+    if (tradeCountToday >= deps.config.MAX_TRADES_PER_DAY) {
+      logger.info({ trade_count_today: tradeCountToday, limit: deps.config.MAX_TRADES_PER_DAY }, "daily trade count limit reached");
+      return { blocked: true, reason: "max_trades_per_day" };
+    }
+  }
+
   const lastTradeCreatedAt = await deps.getLastTradeCreatedAt(tokenMint);
   const cooldownSeconds =
     deps.config.TOKEN_COOLDOWN_SECONDS ??
@@ -104,6 +115,7 @@ async function defaultDependencies(): Promise<BlockerDependencies> {
       FEE_BUFFER_SOL: settings.feeBufferSol,
       LIVE_EXECUTION_ENABLED: settings.liveExecutionEnabled,
       REQUIRE_LIVE_EXECUTION_ENABLED: true,
+      MAX_TRADES_PER_DAY: config.TRADER_MAX_TRADES_PER_DAY,
     },
     now: () => Date.now(),
     async getWalletSol() {
@@ -131,6 +143,15 @@ async function defaultDependencies(): Promise<BlockerDependencies> {
         _sum: { amountSolIn: true },
       });
       return aggregate._sum.amountSolIn ?? 0;
+    },
+    async getDailyTradeCount(startOfDaySeconds) {
+      return db.trade.count({
+        where: {
+          createdAt: { gte: startOfDaySeconds },
+          dryRun: false,
+          state: { not: "pre_submit_failed" },
+        },
+      });
     },
     async getLastTradeCreatedAt(tokenMint) {
       const trade = await db.trade.findFirst({

@@ -92,6 +92,17 @@ for (const reason of [
   "blocklist",
   "insufficient_balance",
   "tripwires_triggered",
+  // Intelligence-layer rejections
+  "no_intelligence_decision",
+  "intelligence_action_not_probe",
+  "intelligence_lane_not_core_ev",
+  "hard_risk_notes",
+  "launch_gate_b_reject",
+  "unknown_exit_policy",
+  "amount_sol_zero",
+  "missing_entry_price_usd",
+  "max_trades_per_day",
+  "daily_notional_limit",
 ] as const) {
   rejections.labels(reason).inc(0);
 }
@@ -128,6 +139,13 @@ export const exitSellToConfirmSeconds = new Histogram({
 export const closePendingCount = new Gauge({
   name: "close_pending_count",
   help: "Current number of positions confirmed on-chain but not yet closed in Flow registry",
+  registers: [register],
+});
+
+export const finalAmountSolHistogram = new Histogram({
+  name: "final_amount_sol",
+  help: "Distribution of clamped trade sizes after intelligence gate and TRADER_MAX_STAKE_SOL cap",
+  buckets: [0.0001, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05],
   registers: [register],
 });
 

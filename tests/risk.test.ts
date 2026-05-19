@@ -31,6 +31,7 @@ function baseDeps(
     getWalletSol: vi.fn().mockResolvedValue(overrides?.walletSol ?? 0.89),
     getDbKillSwitch: vi.fn().mockResolvedValue(overrides?.dbKillSwitch ?? false),
     getDailySpendSol: vi.fn().mockResolvedValue(overrides?.dailySpendSol ?? 0),
+    getDailyTradeCount: vi.fn().mockResolvedValue(0),
     getLastTradeCreatedAt: vi
       .fn()
       .mockResolvedValue(overrides?.lastTradeCreatedAt ?? null),

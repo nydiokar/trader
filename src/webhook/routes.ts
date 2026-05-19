@@ -11,6 +11,7 @@ import {
 import { config } from "../config.js";
 import { executeSignal } from "../executor/index.js";
 import { getLiveSettings, type LiveSettings } from "../runtime/live-settings.js";
+import { finalAmountSolHistogram } from "../metrics/registry.js";
 import {
   extractFlowExitSignals,
   fetchExitPendingSignals,
@@ -31,7 +32,86 @@ import {
   pruneExpiredNonces,
   registerNonce,
 } from "./ingress.js";
-import { SignalPayload } from "./schemas.js";
+import { SignalPayload, type IntelligenceDecisionType, type SignalPayloadType } from "./schemas.js";
+
+// Explicitly supported exit policies — reject anything not in this list.
+// Adding a new policy here is a deliberate act; silent fallback is not allowed.
+const KNOWN_EXIT_POLICIES = new Set(["core_6buy_abandon15_v0"]);
+
+// Hard risk note patterns that block paid trades regardless of other signals.
+// CONTRACT: tokens_ingest must use these exact prefixes for blocking notes and must NOT
+// use them for positive notes (e.g. "mint_authority_revoked" is a positive signal —
+// tokens_ingest should NOT put it in risk_notes; it belongs elsewhere in the decision).
+// Suffix "_revoked" is explicitly excluded to prevent false positives.
+const HARD_RISK_PREFIXES = ["rug", "honeypot", "freeze_authority", "mint_authority", "blacklist"];
+const HARD_RISK_SAFE_SUFFIXES = ["_revoked", "_disabled", "_burned"];
+
+type IntelligenceGateResult =
+  | { ok: true; finalAmountSol: number; slippageBps: number }
+  | { ok: false; reason: string };
+
+function runIntelligenceGate(
+  payload: {
+    amount_sol: number;
+    max_slippage_bps?: number;
+    planned_exit_policy_label?: string;
+    entry_price_usd?: number;
+    intelligence_decision?: IntelligenceDecisionType;
+  },
+  settings: LiveSettings,
+): IntelligenceGateResult {
+  const intel = payload.intelligence_decision;
+
+  if (!intel) {
+    return { ok: false, reason: "no_intelligence_decision" };
+  }
+
+  if (intel.action !== "probe") {
+    return { ok: false, reason: "intelligence_action_not_probe" };
+  }
+
+  if (intel.lane !== "core_ev") {
+    return { ok: false, reason: "intelligence_lane_not_core_ev" };
+  }
+
+  const vectorHits = intel.vector_hits ?? [];
+  if (vectorHits.includes("launch_gate_B_reject")) {
+    return { ok: false, reason: "launch_gate_b_reject" };
+  }
+
+  const riskNotes = intel.risk_notes ?? [];
+  const hardRisk = riskNotes.find((note) => {
+    const lower = note.toLowerCase();
+    const isSafe = HARD_RISK_SAFE_SUFFIXES.some((suffix) => lower.endsWith(suffix));
+    return !isSafe && HARD_RISK_PREFIXES.some((prefix) => lower.startsWith(prefix));
+  });
+  if (hardRisk) {
+    return { ok: false, reason: "hard_risk_notes" };
+  }
+
+  const requestedSol = intel.amount_sol ?? payload.amount_sol;
+  if (requestedSol <= 0) {
+    return { ok: false, reason: "amount_sol_zero" };
+  }
+
+  const exitPolicy = intel.planned_exit_policy_label ?? payload.planned_exit_policy_label;
+  if (!exitPolicy || !KNOWN_EXIT_POLICIES.has(exitPolicy)) {
+    return { ok: false, reason: "unknown_exit_policy" };
+  }
+
+  // entry_price_usd is required for probe trades: without it, registerOpenPositionAfterBuy
+  // is a no-op and tokens_ingest never starts the exit timer — the position would be held
+  // forever with no exit signal ever arriving.
+  if (!payload.entry_price_usd) {
+    return { ok: false, reason: "missing_entry_price_usd" };
+  }
+
+  const finalSol = Math.min(requestedSol, config.TRADER_MAX_STAKE_SOL);
+  // Use payload slippage if provided; otherwise fall back to live setting
+  const slippageBps = payload.max_slippage_bps ?? settings.maxSlippageBps;
+
+  return { ok: true, finalAmountSol: finalSol, slippageBps };
+}
 
 type SignalProcessor = (payload: {
   signal_id: string;
@@ -43,6 +123,7 @@ type SignalProcessor = (payload: {
   entry_liquidity_usd?: number | null;
   planned_exit_policy_label?: string;
   client_timestamp?: number;
+  intelligence_decision?: IntelligenceDecisionType;
 }) => Promise<{
   state: "done" | "failed" | "rejected";
   decision: string;
@@ -188,21 +269,100 @@ export async function registerRoutes(
         return reply.code(200).send(rejectionResponse);
       }
 
-      const executionPayload = applyRuntimeBuySettings(payload, settings);
-      if (
-        executionPayload.amount_sol !== payload.amount_sol ||
-        executionPayload.max_slippage_bps !== payload.max_slippage_bps
-      ) {
+      // ── Intelligence gate ──────────────────────────────────────────────────
+      // When intelligence_decision is present, it is the source of truth.
+      // Legacy mode (no intelligence_decision) is only allowed when explicitly enabled.
+      let executionPayload: Parameters<SignalProcessor>[0];
+
+      if (payload.intelligence_decision) {
+        const gate = runIntelligenceGate(payload, settings);
+
+        if (!gate.ok) {
+          rejections.inc({ reason: gate.reason });
+          const rejectionResponse = {
+            status: "rejected",
+            decision: gate.reason,
+            signal_id: payload.signal_id,
+            intelligence_action: payload.intelligence_decision.action,
+            intelligence_lane: payload.intelligence_decision.lane,
+          };
+          completeSignal(
+            payload.signal_id,
+            "rejected",
+            gate.reason,
+            rejectionResponse,
+            Math.floor(Date.now() / 1000),
+          );
+          notify(
+            formatSignalRejected({
+              signalId: payload.signal_id,
+              tokenMint: payload.token_mint,
+              reason: gate.reason,
+              intelligence: {
+                lane: payload.intelligence_decision.lane,
+                action: payload.intelligence_decision.action,
+                vectorHits: payload.intelligence_decision.vector_hits,
+              },
+            }),
+          ).catch((err) => logger.warn({ err }, "telegram intelligence rejection notification failed"));
+          return reply.code(200).send(rejectionResponse);
+        }
+
+        const exitPolicy = payload.intelligence_decision.planned_exit_policy_label ?? payload.planned_exit_policy_label;
+        executionPayload = {
+          ...payload,
+          amount_sol: gate.finalAmountSol,
+          max_slippage_bps: gate.slippageBps,
+          planned_exit_policy_label: exitPolicy,
+        };
+
+        finalAmountSolHistogram.observe(gate.finalAmountSol);
         logger.info(
           {
             signal_id: payload.signal_id,
-            incoming_amount_sol: payload.amount_sol,
-            execution_amount_sol: executionPayload.amount_sol,
-            incoming_slippage_bps: payload.max_slippage_bps,
-            execution_slippage_bps: executionPayload.max_slippage_bps,
+            intelligence_action: payload.intelligence_decision.action,
+            intelligence_lane: payload.intelligence_decision.lane,
+            intelligence_confidence: payload.intelligence_decision.confidence,
+            vector_hits: payload.intelligence_decision.vector_hits,
+            requested_amount_sol: payload.amount_sol,
+            final_amount_sol: gate.finalAmountSol,
+            slippage_bps: gate.slippageBps,
+            exit_policy: exitPolicy,
           },
-          "signal runtime buy settings applied",
+          "intelligence gate passed",
         );
+      } else if (config.LEGACY_TRADING_ENABLED) {
+        // Legacy path: no intelligence_decision, use runtime buy settings as before.
+        // Exit policy validation is intentionally skipped — in legacy mode the policy
+        // is owned entirely by tokens_ingest and the trader just executes the buy.
+        executionPayload = applyRuntimeBuySettings(payload, settings);
+        if (
+          executionPayload.amount_sol !== payload.amount_sol ||
+          executionPayload.max_slippage_bps !== payload.max_slippage_bps
+        ) {
+          logger.info(
+            {
+              signal_id: payload.signal_id,
+              incoming_amount_sol: payload.amount_sol,
+              execution_amount_sol: executionPayload.amount_sol,
+              incoming_slippage_bps: payload.max_slippage_bps,
+              execution_slippage_bps: executionPayload.max_slippage_bps,
+            },
+            "signal runtime buy settings applied (legacy mode)",
+          );
+        }
+      } else {
+        // No intelligence_decision and legacy mode is disabled — reject
+        rejections.inc({ reason: "no_intelligence_decision" });
+        const rejectionResponse = {
+          status: "rejected",
+          decision: "no_intelligence_decision",
+          signal_id: payload.signal_id,
+        };
+        completeSignal(payload.signal_id, "rejected", "no_intelligence_decision", rejectionResponse, Math.floor(Date.now() / 1000));
+        notify(formatSignalRejected({ signalId: payload.signal_id, tokenMint: payload.token_mint, reason: "no_intelligence_decision" }))
+          .catch((err) => logger.warn({ err }, "telegram no_intelligence_decision rejection notification failed"));
+        return reply.code(200).send(rejectionResponse);
       }
 
       const blocker = await blockerCheck(
@@ -291,8 +451,19 @@ export async function registerRoutes(
           formatSignalReceived({
             signalId: payload.signal_id,
             tokenMint: payload.token_mint,
-            amountSol: executionPayload.amount_sol,
+            amountSol: payload.amount_sol,
+            finalAmountSol: executionPayload.amount_sol,
             entryPriceUsd: payload.entry_price_usd,
+            exitPolicy: executionPayload.planned_exit_policy_label,
+            intelligence: payload.intelligence_decision
+              ? {
+                  lane: payload.intelligence_decision.lane,
+                  action: payload.intelligence_decision.action,
+                  confidence: payload.intelligence_decision.confidence,
+                  vectorHits: payload.intelligence_decision.vector_hits,
+                  mode: payload.intelligence_decision.mode,
+                }
+              : undefined,
           }),
         ).catch((err) => logger.warn({ err }, "telegram signal-received notification failed"));
       }
@@ -366,13 +537,13 @@ export async function registerRoutes(
 }
 
 function applyRuntimeBuySettings(
-  payload: Parameters<SignalProcessor>[0] & { nonce?: string; client_timestamp?: number },
+  payload: SignalPayloadType,
   settings: LiveSettings,
 ): Parameters<SignalProcessor>[0] {
   return {
     ...payload,
     amount_sol: settings.buyAmountSol,
-    max_slippage_bps: settings.maxSlippageBps,
+    max_slippage_bps: payload.max_slippage_bps ?? settings.maxSlippageBps,
   };
 }
 
@@ -380,6 +551,9 @@ async function executeSignalWithRuntimeRetries(
   payload: Parameters<SignalProcessor>[0],
 ): ReturnType<SignalProcessor> {
   const settings = await getLiveSettings();
+  // Ensure slippage has a concrete value before entering the retry loop
+  const resolvedSlippageBps = payload.max_slippage_bps ?? settings.maxSlippageBps;
+  payload = { ...payload, max_slippage_bps: resolvedSlippageBps };
   const attempts: Array<{
     attempt: number;
     slippage_bps: number;

@@ -4,10 +4,12 @@ import { connectDb, db, disconnectDb } from "./db/index.js";
 import { buildServer } from "./webhook/server.js";
 import { getSolanaRpc, getTradingSigner } from "./solana/runtime.js";
 import { FlowExitPoller } from "./flow/exit-poller.js";
+import { getLiveSettings } from "./runtime/live-settings.js";
 
 async function main(): Promise<void> {
   await connectDb();
   await validateStartupReadiness();
+  await validateIntelligenceConfig();
 
   const app = await buildServer();
 
@@ -51,6 +53,22 @@ async function validateStartupReadiness(): Promise<void> {
     },
     "startup wallet and RPC readiness validated",
   );
+}
+
+async function validateIntelligenceConfig(): Promise<void> {
+  if (config.LEGACY_TRADING_ENABLED) return;
+
+  const settings = await getLiveSettings();
+  if (config.TRADER_MAX_STAKE_SOL > settings.perTradeSolCap) {
+    logger.warn(
+      {
+        TRADER_MAX_STAKE_SOL: config.TRADER_MAX_STAKE_SOL,
+        perTradeSolCap: settings.perTradeSolCap,
+      },
+      "TRADER_MAX_STAKE_SOL exceeds live perTradeSolCap — intelligence-gated trades will be blocked " +
+      "by the per_signal_cap blocker. Set per_trade_sol_cap >= TRADER_MAX_STAKE_SOL via live settings.",
+    );
+  }
 }
 
 main().catch((err: unknown) => {

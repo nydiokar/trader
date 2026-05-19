@@ -26,6 +26,16 @@ function sign(secret: string, timestamp: number, body: string): string {
     .digest("hex");
 }
 
+const validIntelligenceDecision = {
+  action: "probe",
+  lane: "core_ev",
+  confidence: 0.82,
+  vector_hits: ["6_buy_signal", "low_holder_concentration"],
+  risk_notes: [],
+  amount_sol: 0.005,
+  planned_exit_policy_label: "core_6buy_abandon15_v0",
+};
+
 function buildPayload(
   overrides?: Partial<{
     signal_id: string;
@@ -34,16 +44,22 @@ function buildPayload(
     amount_sol: number;
     max_slippage_bps: number;
     client_timestamp: number;
+    intelligence_decision: typeof validIntelligenceDecision | null;
   }>,
 ) {
+  const { intelligence_decision, ...rest } = overrides ?? {};
   return {
     signal_id: "11111111-1111-4111-8111-111111111111",
     nonce: "nonce-1234567890abcdef",
     token_mint: mint,
-    amount_sol: 0.1,
+    amount_sol: 0.005,
     max_slippage_bps: 300,
     client_timestamp: Math.floor(Date.now() / 1000),
-    ...overrides,
+    intelligence_decision:
+      intelligence_decision === null ? undefined : (intelligence_decision ?? validIntelligenceDecision),
+    planned_exit_policy_label: "core_6buy_abandon15_v0",
+    entry_price_usd: 0.001,
+    ...rest,
   };
 }
 
@@ -79,6 +95,7 @@ async function makeApp(options?: {
   process.env["PER_SIGNAL_SOL_CAP"] = "1";
   process.env["PER_TOKEN_COOLDOWN_MINUTES"] = "30";
   process.env["WALLET_SOL_FLOOR"] = "0.05";
+  process.env["TRADER_MAX_STAKE_SOL"] = "0.01";
 
   const sqlite = new Database(dbPath);
   sqlite.exec(migrationSql);

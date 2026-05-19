@@ -54,28 +54,57 @@ export function formatSignalReceived(input: {
   signalId: string;
   tokenMint: string;
   amountSol: number;
+  finalAmountSol?: number;
   entryPriceUsd?: number;
+  exitPolicy?: string;
+  intelligence?: {
+    lane: string;
+    action: string;
+    confidence?: number;
+    vectorHits?: string[];
+    mode?: string;
+  };
 }): string {
   const price = input.entryPriceUsd != null ? ` @ $${input.entryPriceUsd.toFixed(4)}` : "";
-  return [
+  const sizeStr =
+    input.finalAmountSol != null && input.finalAmountSol !== input.amountSol
+      ? `${input.finalAmountSol} SOL (capped from ${input.amountSol})`
+      : `${input.amountSol} SOL`;
+  const lines = [
     `📡 <b>SIGNAL RECEIVED</b>`,
     `Token: <code>${input.tokenMint}</code>`,
-    `Size: ${input.amountSol} SOL${price}`,
-    `ID: <code>${input.signalId}</code>`,
-  ].join("\n");
+    `Size: ${sizeStr}${price}`,
+  ];
+  if (input.intelligence) {
+    const { lane, action, confidence, vectorHits, mode } = input.intelligence;
+    lines.push(`Lane: ${lane} | Action: ${action}${mode ? ` | Mode: ${mode}` : ""}`);
+    if (confidence != null) lines.push(`Confidence: ${(confidence * 100).toFixed(1)}%`);
+    if (vectorHits && vectorHits.length > 0) lines.push(`Vectors: ${vectorHits.slice(0, 5).join(", ")}`);
+  }
+  if (input.exitPolicy) lines.push(`Exit: ${input.exitPolicy}`);
+  lines.push(`ID: <code>${input.signalId}</code>`);
+  return lines.join("\n");
 }
 
 export function formatSignalRejected(input: {
   signalId: string;
   tokenMint: string;
   reason: string;
+  intelligence?: {
+    lane?: string;
+    action?: string;
+    vectorHits?: string[];
+  };
 }): string {
-  return [
+  const lines = [
     `🚫 <b>SIGNAL REJECTED</b>`,
     `Token: <code>${input.tokenMint}</code>`,
     `Reason: ${input.reason}`,
-    `ID: <code>${input.signalId}</code>`,
-  ].join("\n");
+  ];
+  if (input.intelligence?.lane) lines.push(`Lane: ${input.intelligence.lane} | Action: ${input.intelligence.action ?? "?"}`);
+  if (input.intelligence?.vectorHits?.length) lines.push(`Vectors: ${input.intelligence.vectorHits.slice(0, 3).join(", ")}`);
+  lines.push(`ID: <code>${input.signalId}</code>`);
+  return lines.join("\n");
 }
 
 export function formatTripwiresWarning(input: {

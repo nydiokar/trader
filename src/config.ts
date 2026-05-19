@@ -63,6 +63,15 @@ const ConfigSchema = z.object({
   WALLET_SOL_FLOOR: z.coerce.number().positive().default(0.05),
   DEFAULT_SLIPPAGE_BPS: z.coerce.number().int().positive().default(300),
 
+  // Intelligence-layer budget guards (trader-side enforcement)
+  TRADER_MAX_STAKE_SOL: z.coerce.number().positive().default(0.01),
+  TRADER_MAX_TRADES_PER_DAY: z.coerce.number().int().positive().default(20),
+  TRADER_DAILY_LOSS_LIMIT_SOL: z.coerce.number().positive().default(0.1),
+  TRADER_DAILY_NOTIONAL_LIMIT_SOL: z.coerce.number().positive().default(0.2),
+
+  // Legacy mode: allow trading without intelligence_decision
+  LEGACY_TRADING_ENABLED: booleanEnv("false"),
+
   // Tripwires
   RUGCHECK_API_KEY: z.string().optional(),
   TRIPWIRES_AS_BLOCKERS: booleanEnv("false"),
