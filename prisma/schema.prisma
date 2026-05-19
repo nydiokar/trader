@@ -135,6 +135,7 @@ model FlowExitExecution {
   dryRun                Boolean   @default(false) @map("dry_run")
   signature             String?
   submittedVia          String?   @map("submitted_via")
+  solReceived           Float?    @map("sol_received")
   closeReason           String?   @map("close_reason")
   closeCallbackStatus   String?   @map("close_callback_status")
   closeCallbackResponse String?   @map("close_callback_response")

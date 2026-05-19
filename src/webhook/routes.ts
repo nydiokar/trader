@@ -48,6 +48,12 @@ import { runBlockers, runTripwires } from "../risk/index.js";
 import { getSolanaRpc, getTradingSigner } from "../solana/runtime.js";
 import { verifyFlowDryRunHmac, verifyHmac } from "./auth.js";
 import {
+  notify,
+  formatSignalReceived,
+  formatSignalRejected,
+  formatTripwiresWarning,
+} from "../notify/telegram.js";
+import {
   completeSignal,
   enterSignal,
   pruneExpiredNonces,
@@ -248,6 +254,14 @@ export async function registerRoutes(
       "signal accepted",
     );
     signalsReceived.inc({ result: "accepted" });
+    notify(
+      formatSignalReceived({
+        signalId: payload.signal_id,
+        tokenMint: payload.token_mint,
+        amountSol: payload.amount_sol,
+        entryPriceUsd: payload.entry_price_usd,
+      }),
+    ).catch((err) => logger.warn({ err }, "telegram signal-received notification failed"));
 
     try {
       const settings = await liveSettingsLoader();
@@ -267,6 +281,13 @@ export async function registerRoutes(
           rejectionResponse,
           Math.floor(Date.now() / 1000),
         );
+        notify(
+          formatSignalRejected({
+            signalId: payload.signal_id,
+            tokenMint: payload.token_mint,
+            reason: `signal_stale (age: ${signalAgeSeconds}s)`,
+          }),
+        ).catch((err) => logger.warn({ err }, "telegram stale-signal notification failed"));
         return reply.code(200).send(rejectionResponse);
       }
 
@@ -309,6 +330,14 @@ export async function registerRoutes(
           Math.floor(Date.now() / 1000),
         );
 
+        notify(
+          formatSignalRejected({
+            signalId: payload.signal_id,
+            tokenMint: payload.token_mint,
+            reason: blocker.reason,
+          }),
+        ).catch((err) => logger.warn({ err }, "telegram rejection notification failed"));
+
         const statusCode = blocker.reason === "kill_switch" ? 503 : 200;
         return reply.code(statusCode).send(rejectionResponse);
       }
@@ -341,8 +370,24 @@ export async function registerRoutes(
             Math.floor(Date.now() / 1000),
           );
 
+          notify(
+            formatSignalRejected({
+              signalId: payload.signal_id,
+              tokenMint: payload.token_mint,
+              reason: `tripwires_triggered: ${tripwires.triggered.join(", ")}`,
+            }),
+          ).catch((err) => logger.warn({ err }, "telegram tripwire rejection notification failed"));
+
           return reply.code(200).send(rejectionResponse);
         }
+
+        notify(
+          formatTripwiresWarning({
+            signalId: payload.signal_id,
+            tokenMint: payload.token_mint,
+            tripwires: tripwires.triggered,
+          }),
+        ).catch((err) => logger.warn({ err }, "telegram tripwire warning notification failed"));
       }
 
       const result = await processSignal(executionPayload);

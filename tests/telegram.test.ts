@@ -24,7 +24,8 @@ describe("telegram notifications", () => {
         body: JSON.stringify({
           chat_id: "chat",
           text: "hello",
-          disable_web_page_preview: true,
+          parse_mode: "HTML",
+          link_preview_options: { is_disabled: true },
         }),
       }),
     );
@@ -36,27 +37,76 @@ describe("telegram notifications", () => {
       formatKillSwitchTriggered,
       formatTradeConfirmed,
       formatTradeFailed,
-      formatTradeRejected,
       formatUncertainTransaction,
       formatWalletBalanceLow,
+      formatSignalReceived,
+      formatSignalRejected,
+      formatTripwiresWarning,
+      formatExitTriggered,
+      formatExitConfirmed,
+      formatExitFailed,
     } = await import("../src/notify/telegram.js");
 
-    expect(
-      formatTradeConfirmed({
-        amountSol: 0.001,
-        actualOut: 1.23,
-        symbol: "USDC",
-        mint: "mint",
-        signature: "sig",
-        latencySeconds: 4.2,
-      }),
-    ).toContain("BUY 0.001 SOL -> 1.23 USDC");
-    expect(formatTradeFailed({ signature: "sig", error: "failed_onchain" })).toContain(
-      "failed_onchain",
-    );
-    expect(formatTradeRejected("daily_cap")).toContain("daily_cap");
-    expect(formatUncertainTransaction("sig")).toContain("Human check required");
+    const confirmed = formatTradeConfirmed({
+      amountSol: 0.001,
+      actualOut: 1.23,
+      symbol: "USDC",
+      mint: "So11111111111111111111111111111111111111112",
+      signature: "sig123",
+      latencySeconds: 4,
+    });
+    expect(confirmed).toContain("BUY CONFIRMED");
+    expect(confirmed).toContain("0.001 SOL");
+    expect(confirmed).toContain("USDC");
+    expect(confirmed).toContain("solscan.io/tx/sig123");
+    expect(confirmed).toContain("4s");
+
+    const failed = formatTradeFailed({ signature: "sig123", error: "failed_onchain" });
+    expect(failed).toContain("BUY FAILED");
+    expect(failed).toContain("failed_onchain");
+    expect(failed).toContain("solscan.io/tx/sig123");
+
+    const uncertain = formatUncertainTransaction("sig123");
+    expect(uncertain).toContain("UNCERTAIN");
+    expect(uncertain).toContain("manual check");
+    expect(uncertain).toContain("solscan.io/tx/sig123");
+
+    expect(formatKillSwitchTriggered("operator")).toContain("KILL SWITCH");
     expect(formatKillSwitchTriggered("operator")).toContain("operator");
-    expect(formatWalletBalanceLow(0.1, 0.2)).toContain("below 2x daily cap");
+
+    expect(formatWalletBalanceLow(0.1, 0.2)).toContain("LOW BALANCE");
+    expect(formatWalletBalanceLow(0.1, 0.2)).toContain("0.1 SOL");
+
+    const received = formatSignalReceived({
+      signalId: "sig-1",
+      tokenMint: "mintXYZ",
+      amountSol: 0.5,
+      entryPriceUsd: 1.2345,
+    });
+    expect(received).toContain("SIGNAL RECEIVED");
+    expect(received).toContain("mintXYZ");
+    expect(received).toContain("0.5 SOL");
+    expect(received).toContain("1.2345");
+
+    const rejected = formatSignalRejected({ signalId: "sig-1", tokenMint: "mintXYZ", reason: "daily_cap" });
+    expect(rejected).toContain("SIGNAL REJECTED");
+    expect(rejected).toContain("daily_cap");
+
+    const tripwire = formatTripwiresWarning({ signalId: "sig-1", tokenMint: "mintXYZ", tripwires: ["rug_risk", "mint_authority"] });
+    expect(tripwire).toContain("TRIPWIRES");
+    expect(tripwire).toContain("rug_risk");
+
+    const exitTriggered = formatExitTriggered({ tokenMint: "mintXYZ", positionId: "pos-1", triggerReason: "take_profit", sizeSol: 0.5 });
+    expect(exitTriggered).toContain("EXIT TRIGGERED");
+    expect(exitTriggered).toContain("take_profit");
+    expect(exitTriggered).toContain("0.5 SOL");
+
+    const exitConfirmed = formatExitConfirmed({ tokenMint: "mintXYZ", positionId: "pos-1", signature: "sig123", triggerReason: "take_profit" });
+    expect(exitConfirmed).toContain("EXIT CONFIRMED");
+    expect(exitConfirmed).toContain("solscan.io/tx/sig123");
+
+    const exitFailed = formatExitFailed({ tokenMint: "mintXYZ", positionId: "pos-1", error: "zero_token_balance" });
+    expect(exitFailed).toContain("EXIT FAILED");
+    expect(exitFailed).toContain("zero_token_balance");
   });
 });

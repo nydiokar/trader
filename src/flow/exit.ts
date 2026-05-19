@@ -3,6 +3,12 @@ import { db } from "../db/index.js";
 import { executeTokenSell } from "../executor/index.js";
 import { logger } from "../logger.js";
 import { getLiveSettings } from "../runtime/live-settings.js";
+import {
+  notify,
+  formatExitTriggered,
+  formatExitConfirmed,
+  formatExitFailed,
+} from "../notify/telegram.js";
 import { getTradingSigner } from "../solana/runtime.js";
 import {
   FlowExitHttpEnvelopeSchema,
@@ -92,6 +98,13 @@ export async function handleFlowExitSignal(signal: FlowExitSignal): Promise<Flow
       errorMessage: "runtime sell_execution_enabled is false",
       completedAt: new Date(),
     });
+    notify(
+      formatExitFailed({
+        tokenMint: signal.token_mint,
+        positionId: signal.position_id,
+        error: "sell_execution_disabled",
+      }),
+    ).catch((err) => logger.warn({ err }, "telegram exit-failed notification failed"));
     return {
       status: "failed",
       position_id: signal.position_id,
@@ -117,6 +130,13 @@ export async function handleFlowExitSignal(signal: FlowExitSignal): Promise<Flow
       errorMessage: "wallet token balance is zero",
       completedAt: new Date(),
     });
+    notify(
+      formatExitFailed({
+        tokenMint: signal.token_mint,
+        positionId: signal.position_id,
+        error: "zero_token_balance",
+      }),
+    ).catch((err) => logger.warn({ err }, "telegram exit-failed notification failed"));
     return {
       status: "failed",
       position_id: signal.position_id,
@@ -125,6 +145,17 @@ export async function handleFlowExitSignal(signal: FlowExitSignal): Promise<Flow
       error: "zero_token_balance",
     };
   }
+
+  // notify only when we actually attempt to execute the sell
+  notify(
+    formatExitTriggered({
+      tokenMint: signal.token_mint,
+      positionId: signal.position_id,
+      triggerReason: signal.trigger_reason,
+      sizeSol: signal.size_sol,
+      priceAtTriggerUsd: signal.price_at_trigger_usd,
+    }),
+  ).catch((err) => logger.warn({ err }, "telegram exit-triggered notification failed"));
 
   const result = await executeTokenSell({
     exitId: claim.row.id,
@@ -144,6 +175,14 @@ export async function handleFlowExitSignal(signal: FlowExitSignal): Promise<Flow
       errorMessage: error,
       completedAt: new Date(),
     });
+    notify(
+      formatExitFailed({
+        tokenMint: signal.token_mint,
+        positionId: signal.position_id,
+        error,
+        signature: result.response.signature,
+      }),
+    ).catch((err) => logger.warn({ err }, "telegram exit-failed notification failed"));
     return {
       status: "failed",
       position_id: signal.position_id,
@@ -154,12 +193,25 @@ export async function handleFlowExitSignal(signal: FlowExitSignal): Promise<Flow
     };
   }
 
+  if (result.response.signature) {
+    notify(
+      formatExitConfirmed({
+        tokenMint: signal.token_mint,
+        positionId: signal.position_id,
+        signature: result.response.signature,
+        triggerReason: signal.trigger_reason,
+        sizeSol: signal.size_sol,
+      }),
+    ).catch((err) => logger.warn({ err }, "telegram exit-confirmed notification failed"));
+  }
+
   const pendingClose = await upsertExitRow(signal, {
     state: "sell_confirmed_close_pending",
     dryRun: false,
     tokenAmountRaw,
     signature: result.response.signature,
     submittedVia: result.response.submitted_via,
+    solReceived: result.response.sol_received,
     closeReason: signal.trigger_reason,
     errorReason: null,
     errorMessage: null,
@@ -277,13 +329,19 @@ async function retryCloseOnly(
   signal: FlowExitSignal,
   row: Awaited<ReturnType<typeof upsertExitRow>>,
 ): Promise<FlowExitResult> {
-  const closeResult = await closePosition(signal.position_id, signal.trigger_reason);
+  const closeResult = await closePosition(signal.position_id, signal.trigger_reason, {
+    sell_signature: row.signature ?? undefined,
+    sell_sol_received: row.solReceived ?? undefined,
+    sell_token_amount_raw: row.tokenAmountRaw ?? undefined,
+    sell_submitted_via: row.submittedVia ?? undefined,
+  });
   const closed = await upsertExitRow(signal, {
     state: closeResult.ok ? "closed" : "sell_confirmed_close_pending",
     dryRun: false,
     tokenAmountRaw: row.tokenAmountRaw,
     signature: row.signature,
     submittedVia: row.submittedVia,
+    solReceived: row.solReceived,
     closeReason: signal.trigger_reason,
     closeCallbackStatus: closeResult.status,
     closeCallbackResponse: closeResult.body,
@@ -341,6 +399,7 @@ async function upsertExitRow(
     tokenDecimals?: number | null;
     signature?: string | null;
     submittedVia?: string | null;
+    solReceived?: number | null;
     closeReason?: string | null;
     closeCallbackStatus?: string | null;
     closeCallbackResponse?: string | null;
@@ -366,6 +425,7 @@ async function upsertExitRow(
       dryRun: update.dryRun,
       signature: update.signature,
       submittedVia: update.submittedVia,
+      solReceived: update.solReceived,
       closeReason: update.closeReason,
       closeCallbackStatus: update.closeCallbackStatus,
       closeCallbackResponse: update.closeCallbackResponse,
@@ -426,11 +486,16 @@ async function getWalletTokenBalanceRaw(tokenMint: string): Promise<string> {
   return total.toString();
 }
 
-async function closePosition(positionId: string, closeReason: string): Promise<{
-  ok: boolean;
-  status: string;
-  body: string;
-}> {
+async function closePosition(
+  positionId: string,
+  closeReason: string,
+  sellResult?: {
+    sell_signature?: string;
+    sell_sol_received?: number;
+    sell_token_amount_raw?: string;
+    sell_submitted_via?: string;
+  },
+): Promise<{ ok: boolean; status: string; body: string }> {
   if (!config.TOKENS_INGEST_BASE_URL) {
     return { ok: false, status: "not_configured", body: "TOKENS_INGEST_BASE_URL is not configured" };
   }
@@ -438,7 +503,7 @@ async function closePosition(positionId: string, closeReason: string): Promise<{
   const response = await fetch(new URL("/positions/close", config.TOKENS_INGEST_BASE_URL), {
     method: "POST",
     headers: tokensIngestHeaders({ "content-type": "application/json" }),
-    body: JSON.stringify({ id: positionId, close_reason: closeReason }),
+    body: JSON.stringify({ id: positionId, close_reason: closeReason, ...sellResult }),
   });
   const body = await response.text();
   return { ok: response.ok, status: String(response.status), body };

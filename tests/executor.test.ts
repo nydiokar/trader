@@ -1609,7 +1609,7 @@ describe("Executor Telegram notifications", () => {
     );
 
     expect(notifyFn).toHaveBeenCalledOnce();
-    expect(notifyFn.mock.calls[0]![0]).toContain("failed");
+    expect(notifyFn.mock.calls[0]![0]).toContain("FAILED");
   });
 
   it("calls notify with uncertain message after uncertain trade (submission attempted)", async () => {

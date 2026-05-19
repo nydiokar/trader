@@ -15,7 +15,8 @@ export async function notify(message: string): Promise<void> {
       body: JSON.stringify({
         chat_id: config.TELEGRAM_CHAT_ID,
         text: message,
-        disable_web_page_preview: true,
+        parse_mode: "HTML",
+        link_preview_options: { is_disabled: true },
       }),
     },
   );
@@ -24,6 +25,51 @@ export async function notify(message: string): Promise<void> {
     throw new Error(`telegram notification failed with HTTP ${response.status}`);
   }
 }
+
+// ── Signal lifecycle ────────────────────────────────────────────────────────
+
+export function formatSignalReceived(input: {
+  signalId: string;
+  tokenMint: string;
+  amountSol: number;
+  entryPriceUsd?: number;
+}): string {
+  const price = input.entryPriceUsd != null ? ` @ $${input.entryPriceUsd.toFixed(4)}` : "";
+  return [
+    `📡 <b>SIGNAL RECEIVED</b>`,
+    `Token: <code>${input.tokenMint}</code>`,
+    `Size: ${input.amountSol} SOL${price}`,
+    `ID: <code>${input.signalId}</code>`,
+  ].join("\n");
+}
+
+export function formatSignalRejected(input: {
+  signalId: string;
+  tokenMint: string;
+  reason: string;
+}): string {
+  return [
+    `🚫 <b>SIGNAL REJECTED</b>`,
+    `Token: <code>${input.tokenMint}</code>`,
+    `Reason: ${input.reason}`,
+    `ID: <code>${input.signalId}</code>`,
+  ].join("\n");
+}
+
+export function formatTripwiresWarning(input: {
+  signalId: string;
+  tokenMint: string;
+  tripwires: string[];
+}): string {
+  return [
+    `⚠️ <b>TRIPWIRES (proceeding)</b>`,
+    `Token: <code>${input.tokenMint}</code>`,
+    `Flags: ${input.tripwires.join(", ")}`,
+    `ID: <code>${input.signalId}</code>`,
+  ].join("\n");
+}
+
+// ── Entry (buy) outcomes ────────────────────────────────────────────────────
 
 export function formatTradeConfirmed(input: {
   amountSol: number;
@@ -34,31 +80,90 @@ export function formatTradeConfirmed(input: {
   latencySeconds: number;
 }): string {
   return [
-    `BUY ${input.amountSol} SOL -> ${input.actualOut} ${input.symbol}`,
-    `Mint: ${input.mint}`,
+    `✅ <b>BUY CONFIRMED</b>`,
+    `Token: <code>${input.mint}</code>`,
+    `${input.amountSol} SOL → ${input.actualOut.toLocaleString()} ${input.symbol}`,
     `Tx: https://solscan.io/tx/${input.signature}`,
     `Latency: ${input.latencySeconds}s`,
   ].join("\n");
 }
 
 export function formatTradeFailed(input: { signature?: string; error: string }): string {
-  return `Trade failed: ${input.error}${
-    input.signature ? `\nTx: https://solscan.io/tx/${input.signature}` : ""
-  }`;
-}
-
-export function formatTradeRejected(reason: string): string {
-  return `Trade rejected by blocker: ${reason}`;
+  const lines = [`❌ <b>BUY FAILED</b>`, `Error: ${input.error}`];
+  if (input.signature) lines.push(`Tx: https://solscan.io/tx/${input.signature}`);
+  return lines.join("\n");
 }
 
 export function formatUncertainTransaction(signature: string): string {
-  return `UNCERTAIN transaction state. Human check required.\nTx: https://solscan.io/tx/${signature}`;
+  return [
+    `⚠️ <b>UNCERTAIN TX — manual check required</b>`,
+    `Tx: https://solscan.io/tx/${signature}`,
+  ].join("\n");
 }
 
+// ── Exit (sell) outcomes ────────────────────────────────────────────────────
+
+export function formatExitTriggered(input: {
+  tokenMint: string;
+  positionId: string;
+  triggerReason: string;
+  sizeSol?: number;
+  priceAtTriggerUsd?: number;
+}): string {
+  const lines = [
+    `📤 <b>EXIT TRIGGERED</b>`,
+    `Token: <code>${input.tokenMint}</code>`,
+    `Reason: ${input.triggerReason}`,
+  ];
+  if (input.sizeSol != null) lines.push(`Size: ${input.sizeSol} SOL`);
+  if (input.priceAtTriggerUsd != null)
+    lines.push(`Price: $${input.priceAtTriggerUsd.toFixed(4)}`);
+  lines.push(`Position: <code>${input.positionId}</code>`);
+  return lines.join("\n");
+}
+
+export function formatExitConfirmed(input: {
+  tokenMint: string;
+  positionId: string;
+  signature: string;
+  triggerReason: string;
+  sizeSol?: number;
+}): string {
+  const lines = [
+    `💰 <b>EXIT CONFIRMED</b>`,
+    `Token: <code>${input.tokenMint}</code>`,
+    `Reason: ${input.triggerReason}`,
+  ];
+  if (input.sizeSol != null) lines.push(`Size: ${input.sizeSol} SOL`);
+  lines.push(
+    `Tx: https://solscan.io/tx/${input.signature}`,
+    `Position: <code>${input.positionId}</code>`,
+  );
+  return lines.join("\n");
+}
+
+export function formatExitFailed(input: {
+  tokenMint: string;
+  positionId: string;
+  error: string;
+  signature?: string;
+}): string {
+  const lines = [
+    `❌ <b>EXIT FAILED</b>`,
+    `Token: <code>${input.tokenMint}</code>`,
+    `Error: ${input.error}`,
+  ];
+  if (input.signature) lines.push(`Tx: https://solscan.io/tx/${input.signature}`);
+  lines.push(`Position: <code>${input.positionId}</code>`);
+  return lines.join("\n");
+}
+
+// ── System alerts ───────────────────────────────────────────────────────────
+
 export function formatKillSwitchTriggered(cause: string): string {
-  return `Kill switch triggered: ${cause}`;
+  return `🔴 <b>KILL SWITCH</b>\n${cause}`;
 }
 
 export function formatWalletBalanceLow(walletSol: number, dailyCapSol: number): string {
-  return `Wallet balance below 2x daily cap: ${walletSol} SOL available, ${dailyCapSol} SOL daily cap`;
+  return `⚠️ <b>LOW BALANCE</b>\nWallet: ${walletSol} SOL | Daily cap: ${dailyCapSol} SOL`;
 }

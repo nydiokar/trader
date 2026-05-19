@@ -1,6 +1,6 @@
 # Trader Bot - Project Context
 
-**Branch:** `main` | **Last Updated:** 2026-05-18 | **Status:** M0-M3 complete. M4-M5 core executor implemented with deterministic coverage; M6-M7 partially implemented; Flow-to-bot dry-run bridge Stages 1-5 complete for production dry-run observability; Stage 6 live-readiness recheck evaluator implemented; live trading is fact - currently only buying.
+**Branch:** `main` | **Last Updated:** 2026-05-18 | **Status:** M0-M3 complete. M4-M5 core executor implemented with deterministic coverage; M6-M7 partially implemented; Flow-to-bot dry-run bridge Stages 1-5 complete for production dry-run observability; Stage 6 live-readiness recheck evaluator implemented; live trading is fact — full buy→registry→exit→sell loop is live as of 2026-05-18.
 
 ---
 
@@ -77,9 +77,9 @@ Target production architecture:
 
 **Stage 7: Done** — live buying is active at tiny capital via Flow → `/signal`.
 
-**Stages 8-9: Not started**
-- Stage 8: Position lifecycle and sell/exit engine (buy→registry→exit→sell loop).
-- Stage 9: End-to-end production canary and size-up.
+**Stage 8: Done** — full loop is live: buy confirms → `POST /positions/open` → Flow registry → ExitMonitor fires trail70 → `exit_pending` → FlowExitPoller picks up → `executeTokenSell()` → sell confirmed → `POST /positions/close` → Flow registry closed. First two live sell signatures confirmed 2026-05-18. Runtime: `sell_execution_enabled=true`.
+
+**Stage 9: Not started** — end-to-end production canary and size-up.
 
 Hard constraints:
 - Do not parse Telegram messages as bot input.
@@ -110,31 +110,19 @@ Buy-only. Signal source sends ungraduated bonding-curve tokens regularly — Jup
 
 Spec: `.ai/milestones/M-trade-registry-and-sell-wiring.md`
 
-Both sides are implemented but the loop has never completed end-to-end. **Zero rows have ever been posted to `toke
-ns_ingest open_positions`.**
+**The loop:** Flow → `POST /signal` (bot buys) → bot `POST /positions/open` (Flow registry) → ExitMonitor fires → bot `POST /flow/exit` → bot sells → bot `POST /positions/close` (Flow registry).
 
-**The loop:** Flow → `POST /signal` (bot buys) → bot `POST /positions/open` (Flow registry) → ExitMonitor fires → `POST /flow/exit` → trading bot sells → bot `POST /positions/close` (Flow registry).
+All code is implemented. The loop has never completed end-to-end. Zero rows in `tokens_ingest open_positions`.
 
-**What is wired:**
-- `registerOpenPositionAfterBuy()` at `src/executor/index.ts:648` — fires `POST /positions/open` to Flow after every confirmed buy. Fire-and-forget.
-- `/signal` webhook passes `positionFeedback` when Flow's payload includes `entry_price_usd` + `planned_exit_policy_label`. Flow's outbox sends both fields (`outbox.ts:181,183`); `entry_price_usd` is `market?.price_usd ?? undefined` so missing market data silently skips registration.
-- `closePosition()` at `src/flow/exit.ts:429` — fires `POST /positions/close` to Flow after confirmed sell. Schema matches.
-- `FlowExitPoller` — polls `GET /positions/exit-pending` every 30s when `FLOW_EXIT_POLL_ENABLED=true`.
-- `handleFlowExitSignal()` → `executeTokenSell()` — full sell executor path implemented.
+**Why buys are not reaching the registry right now:**
+`registerOpenPositionAfterBuy()` (`src/executor/index.ts:654`) is gated on two conditions: `TOKENS_INGEST_BASE_URL` must be set AND `positionFeedback` must be non-null. `positionFeedback` is only passed from the `/signal` webhook when the incoming payload has both `entry_price_usd` AND `planned_exit_policy_label`. Flow's outbox sets `entry_price_usd: market?.price_usd ?? undefined` — if market data is missing at delivery time the field is absent, `positionFeedback` is undefined, and registration silently skips. It is unknown whether real live signals consistently include `entry_price_usd`.
 
-**Gaps — loop has never run end-to-end:** 
-- No confirmed buy has come through the live `/signal` route yet — unknown whether `entry_price_usd` is consistently populated in real Flow signals, and therefore whether `POST /positions/open` has ever fired.
-- `FLOW_EXIT_POLL_ENABLED` defaults to `false` — exit poller never starts.
-- `sell_execution_enabled` is `false` — intentional, do not change yet.
-
-**To verify the buy→registry half works:**
-- [ ] Confirm a real `/signal` buy lands and check logs for `POST /positions/open` success or `"position open feedback failed"`.
-- [ ] Query `tokens_ingest open_positions` to verify the row exists.
-- [ ] Set `FLOW_EXIT_POLL_ENABLED=true` in `.env` — poller will journal exit signals as `dry_run_journaled`, no sell executed yet.
-
-**Before enabling sells:**
-- [ ] Confirm ExitMonitor fires and bot receives `/flow/exit` (logs: "flow exit poll handled signal").
-- [ ] Set `sell_execution_enabled=true` and verify full loop: buy → position registered → exit fires → sell confirms → `POST /positions/close` → position closed in Flow registry.
+**Loop is live as of 2026-05-18.** All tasks complete:
+- [x] Live signals consistently include `entry_price_usd` and `planned_exit_policy_label` — `positionFeedback` is always populated.
+- [x] Confirmed buys produce rows in `tokens_ingest open_positions` — registry was already populating correctly.
+- [x] `FLOW_EXIT_POLL_ENABLED=true` in `.env`; poller runs every 30s with `dry_run:false`.
+- [x] ExitMonitor fires trail70 rule and marks positions `exit_pending`; bot picks up within 30s.
+- [x] `sell_execution_enabled=true` in runtime_settings; sells executing and confirmed on-chain.
 
 ---
 

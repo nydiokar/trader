@@ -2,6 +2,12 @@ import { config } from "../config.js";
 import { logger } from "../logger.js";
 import { fetchExitPendingSignals, handleFlowExitSignal } from "./exit.js";
 
+// Safety-net only. The Flow ExitMonitor now pushes exit signals directly to
+// POST /flow/exit the moment trail70 fires. This poller runs at a slow cadence
+// and catches any positions that were missed (trader restart, network blip, etc.).
+// Positions already handled by the push are skipped via already_processed guard.
+const SAFETY_NET_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+
 export class FlowExitPoller {
   private timer: NodeJS.Timeout | null = null;
   private running = false;
@@ -12,13 +18,13 @@ export class FlowExitPoller {
     if (this.timer || this.stopped) return;
     logger.info(
       {
-        interval_ms: config.FLOW_EXIT_POLL_INTERVAL_MS,
+        interval_ms: SAFETY_NET_INTERVAL_MS,
         dry_run: config.DRY_RUN,
+        mode: "safety_net",
       },
-      "flow exit poller started",
+      "flow exit poller started (safety-net mode)",
     );
-    void this.tick();
-    this.timer = setInterval(() => void this.tick(), config.FLOW_EXIT_POLL_INTERVAL_MS);
+    this.timer = setInterval(() => void this.tick(), SAFETY_NET_INTERVAL_MS);
   }
 
   stop(): void {

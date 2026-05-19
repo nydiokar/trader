@@ -273,6 +273,7 @@ export async function executeTokenSell(input: {
     exit_id: string;
     signature?: string;
     submitted_via?: SubmissionPath;
+    sol_received?: number;
     dry_run?: boolean;
   };
 }> {
@@ -296,6 +297,7 @@ export async function executeTokenSellWithDependencies(
     exit_id: string;
     signature?: string;
     submitted_via?: SubmissionPath;
+    sol_received?: number;
     dry_run?: boolean;
   };
 }> {
@@ -364,6 +366,12 @@ export async function executeTokenSellWithDependencies(
     );
 
     if (outcome === "confirmed") {
+      const solReceived = await reconcileSolReceivedFromSell(
+        deps.connection,
+        signature,
+        deps.wallet.address,
+        input.exitId,
+      );
       return {
         state: "done",
         decision: "accepted",
@@ -372,6 +380,7 @@ export async function executeTokenSellWithDependencies(
           exit_id: input.exitId,
           signature: signature.toString(),
           submitted_via: submittedVia,
+          ...(solReceived !== undefined ? { sol_received: solReceived } : {}),
         },
       };
     }
@@ -1314,6 +1323,48 @@ function reconcileSolSpent(
 
   const deltaLamports = preLamports - postLamports - feeLamports;
   return Number(deltaLamports) / 1_000_000_000;
+}
+
+async function reconcileSolReceivedFromSell(
+  connection: ChainClient,
+  signature: Signature,
+  walletAddress: Address,
+  exitId: string,
+): Promise<number | undefined> {
+  let transaction: ConfirmedTransactionDetails | null;
+  try {
+    transaction = await connection.getTransaction(signature, { maxSupportedTransactionVersion: 0 });
+  } catch {
+    logger.warn({ exit_id: exitId, signature: signature.toString() }, "sell reconciliation: getTransaction failed");
+    return undefined;
+  }
+  if (!transaction) {
+    logger.warn({ exit_id: exitId, signature: signature.toString() }, "sell reconciliation: transaction not found");
+    return undefined;
+  }
+
+  const wallet = walletAddress.toString();
+  const accountKeys = transaction.transaction?.message?.accountKeys;
+  if (!accountKeys || accountKeys.length === 0) return undefined;
+
+  const walletIndex = accountKeys.findIndex((key) => {
+    const pubkey = typeof key === "string" ? key : key.pubkey;
+    return pubkey === wallet;
+  });
+  if (walletIndex === -1) return undefined;
+
+  const pre = transaction.meta?.preBalances?.[walletIndex];
+  const post = transaction.meta?.postBalances?.[walletIndex];
+  if (pre === undefined || post === undefined) return undefined;
+
+  const preLamports = toLamportsBigInt(pre);
+  const postLamports = toLamportsBigInt(post);
+  if (preLamports === null || postLamports === null) return undefined;
+
+  // Net SOL gained in wallet after fees (post already reflects fee deduction).
+  const netLamports = postLamports - preLamports;
+  if (netLamports <= 0n) return undefined;
+  return Number(netLamports) / 1_000_000_000;
 }
 
 function toLamportsBigInt(value: number | bigint): bigint | null {
