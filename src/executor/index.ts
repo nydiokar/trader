@@ -1,23 +1,12 @@
-import type { QuoteResponse, SwapInstructionsResponse } from "@jup-ag/api";
-import bs58 from "bs58";
+import type { QuoteResponse } from "@jup-ag/api";
 import {
-  AccountRole,
   type Address,
   address,
-  appendTransactionMessageInstructions,
   type Base64EncodedWireTransaction,
   type Blockhash,
-  compressTransactionMessageUsingAddressLookupTables,
-  createTransactionMessage,
-  fetchAddressesForLookupTables,
   getBase64EncodedWireTransaction,
   getSignatureFromTransaction,
-  pipe,
   type Signature,
-  setTransactionMessageComputeUnitLimit,
-  setTransactionMessageComputeUnitPrice,
-  setTransactionMessageFeePayerSigner,
-  setTransactionMessageLifetimeUsingBlockhash,
   signTransactionMessageWithSigners,
 } from "@solana/kit";
 import { config } from "../config.js";
@@ -38,11 +27,11 @@ import {
 } from "./jito.js";
 import {
   createHeliusSenderClient,
-  createHeliusSenderTipInstruction,
+  createHeliusSenderTipTransaction,
   HeliusSenderSyncError,
   type HeliusSenderClient,
 } from "./helius-sender.js";
-import { getQuote, getQuoteForSwap, getSwapInstructions, JupiterApiError, WSOL_MINT } from "./jupiter.js";
+import { getQuote, getQuoteForSwap, getSwap, JupiterApiError, WSOL_MINT } from "./jupiter.js";
 import { getPriorityFeeEstimate } from "./priority_fee.js";
 import {
   notify,
@@ -52,7 +41,6 @@ import {
 } from "../notify/telegram.js";
 import { evaluateSloAlerts, formatSloAlert } from "../metrics/slo.js";
 
-const FIXED_COMPUTE_UNIT_LIMIT = 1_400_000;
 const CONFIRM_TIMEOUT_MS = 45_000;
 const CONFIRM_POLL_INTERVAL_MS = 1_500;
 const EXPIRY_FINAL_CHECK_DELAY_MS = 2_000;
@@ -67,29 +55,25 @@ type ExecutionOutcome =
 type SubmissionPath = "helius_sender" | "jito" | "rpc";
 type SubmissionMode = "helius_sender" | "jito" | "rpc";
 
-type TransactionInstruction = {
-  programAddress: Address;
-  accounts: Array<{ address: Address; role: AccountRole }>;
-  data: Uint8Array;
-};
-
 type QuoteClient = {
   getQuote(tokenMint: string, amountSol: number, maxSlippageBps: number): Promise<QuoteResponse>;
-  getSwapInstructions(
+  getSwap(
     quote: QuoteResponse,
     walletPublicKey: string,
-  ): Promise<SwapInstructionsResponse>;
+    computeUnitPriceMicroLamports: number,
+  ): Promise<{ swapTransaction: string; lastValidBlockHeight: number }>;
 };
 
 type PriorityFeeClient = {
   getPriorityFeeEstimate(serializedTransaction?: string): Promise<bigint>;
 };
 
+const TX_SIZE_LIMIT_BYTES = 1200;
+
 type ChainClient = {
   getLatestBlockhash(
     commitment: "confirmed",
   ): Promise<{ blockhash: Blockhash; lastValidBlockHeight: number }>;
-  fetchLookupTableAddresses(addresses: Address[]): Promise<Record<Address, Address[]>>;
   sendTransaction(
     base64EncodedWireTransaction: Base64EncodedWireTransaction,
     options: { skipPreflight: boolean; maxRetries: number },
@@ -198,7 +182,7 @@ function defaultDependencies(): Promise<ExecutorDependencies> {
     connection: createChainClient(getSolanaRpc()),
     quoteClient: {
       getQuote,
-      getSwapInstructions,
+      getSwap,
     },
     priorityFeeClient: {
       getPriorityFeeEstimate: (serializedTransaction?: string) =>
@@ -300,17 +284,16 @@ export async function executeTokenSellWithDependencies(
       input.tokenAmountRaw,
       input.maxSlippageBps,
     );
-    const swapInstructions = await deps.quoteClient.getSwapInstructions(
+    const priorityFeeMicroLamports = await deps.priorityFeeClient.getPriorityFeeEstimate();
+    const swapResponse = await deps.quoteClient.getSwap(
       quote,
       deps.wallet.address.toString(),
+      Number(priorityFeeMicroLamports),
     );
-    const additionalInstructions = await buildAdditionalSubmissionInstructions(deps);
-    const builtTransaction = await buildSwapTransaction(
-      deps.connection,
+    const builtTransaction = await deserializeAndSign(
+      swapResponse.swapTransaction,
       deps.wallet,
-      swapInstructions,
-      deps.priorityFeeClient,
-      additionalInstructions,
+      deps.connection,
     );
     signature = getSignatureFromTransaction(builtTransaction.transaction);
     const signedWireTransaction = getBase64EncodedWireTransaction(
@@ -319,7 +302,7 @@ export async function executeTokenSellWithDependencies(
 
     const submittedVia = await submitBuiltTransaction({
       deps,
-      builtTransaction,
+      lastValidBlockHeight: swapResponse.lastValidBlockHeight,
       signedWireTransaction,
       submissionState: {
         markAttempted: () => {
@@ -331,7 +314,7 @@ export async function executeTokenSellWithDependencies(
     const outcome = await pollForConfirmation(
       deps.connection,
       signature,
-      builtTransaction.lastValidBlockHeight,
+      swapResponse.lastValidBlockHeight,
       deps.sleep,
       deps.now,
     );
@@ -417,18 +400,16 @@ export async function executeSignalWithDependencies(
       input.maxSlippageBps,
     );
 
-    const swapInstructions = await deps.quoteClient.getSwapInstructions(
+    const priorityFeeMicroLamports = await deps.priorityFeeClient.getPriorityFeeEstimate();
+    const swapResponse = await deps.quoteClient.getSwap(
       quote,
       deps.wallet.address.toString(),
+      Number(priorityFeeMicroLamports),
     );
-    const additionalInstructions = await buildAdditionalSubmissionInstructions(deps);
-
-    const builtTransaction = await buildSwapTransaction(
-      deps.connection,
+    const builtTransaction = await deserializeAndSign(
+      swapResponse.swapTransaction,
       deps.wallet,
-      swapInstructions,
-      deps.priorityFeeClient,
-      additionalInstructions,
+      deps.connection,
     );
 
     signature = getSignatureFromTransaction(builtTransaction.transaction);
@@ -438,7 +419,7 @@ export async function executeSignalWithDependencies(
 
     submittedVia = await submitBuiltTransaction({
       deps,
-      builtTransaction,
+      lastValidBlockHeight: swapResponse.lastValidBlockHeight,
       signedWireTransaction,
       submissionState: {
         markAttempted: () => {
@@ -453,7 +434,7 @@ export async function executeSignalWithDependencies(
       outcome = await pollForConfirmation(
         deps.connection,
         signature,
-        builtTransaction.lastValidBlockHeight,
+        swapResponse.lastValidBlockHeight,
         deps.sleep,
         deps.now,
       );
@@ -662,26 +643,6 @@ async function defaultSloQuery(windowStartSeconds: number): Promise<SloQueryResu
   return { submitted, confirmed, submitToConfirmValues };
 }
 
-async function buildAdditionalSubmissionInstructions(
-  deps: ExecutorDependencies,
-): Promise<TransactionInstruction[]> {
-  if (resolveSubmissionMode(deps) !== "helius_sender") {
-    return [];
-  }
-
-  if (!deps.heliusSenderClient) {
-    throw new Error("helius_sender submission mode requires heliusSenderClient");
-  }
-
-  return [
-    createHeliusSenderTipInstruction({
-      source: address(deps.wallet.address),
-      tipAccount: deps.heliusSenderClient.getTipAccount(),
-      tipLamports: deps.heliusSenderTipLamports ?? BigInt(config.HELIUS_SENDER_TIP_LAMPORTS),
-    }),
-  ];
-}
-
 async function runSloCheck(
   deps: Pick<ExecutorDependencies, "notify" | "querySloWindow" | "sloWindowHours" | "now">,
 ): Promise<void> {
@@ -731,19 +692,6 @@ function createChainClient(rpc: ReturnType<typeof getSolanaRpc>): ChainClient {
         lastValidBlockHeight: Number(response.value.lastValidBlockHeight),
       };
     },
-    async fetchLookupTableAddresses(lookupTableAddresses) {
-      const lookupTables = await fetchAddressesForLookupTables(
-        lookupTableAddresses,
-        rpc,
-      );
-
-      return Object.fromEntries(
-        Object.entries(lookupTables).map(([lookupTableAddress, addresses]) => [
-          lookupTableAddress,
-          [...addresses],
-        ]),
-      ) as Record<Address, Address[]>;
-    },
     async sendTransaction(base64EncodedWireTransaction, options) {
       return rpc
         .sendTransaction(base64EncodedWireTransaction, {
@@ -759,7 +707,7 @@ function createChainClient(rpc: ReturnType<typeof getSolanaRpc>): ChainClient {
         .simulateTransaction(base64EncodedWireTransaction, {
           encoding: "base64",
           commitment: "confirmed",
-          replaceRecentBlockhash: false,
+          replaceRecentBlockhash: true,
           sigVerify: false,
         })
         .send();
@@ -791,77 +739,62 @@ function createChainClient(rpc: ReturnType<typeof getSolanaRpc>): ChainClient {
   };
 }
 
-async function buildSwapTransaction(
-  connection: ChainClient,
+async function deserializeAndSign(
+  base64Tx: string,
   wallet: Awaited<ReturnType<typeof getTradingSigner>>,
-  swapInstructions: SwapInstructionsResponse,
-  priorityFeeClient: PriorityFeeClient,
-  additionalInstructions: TransactionInstruction[] = [],
+  connection: ChainClient,
 ): Promise<{
   transaction: Awaited<ReturnType<typeof signTransactionMessageWithSigners>>;
-  lastValidBlockHeight: number;
-  latestBlockhash: { blockhash: Blockhash; lastValidBlockHeight: bigint };
 }> {
+  const rawBytes = Buffer.from(base64Tx, "base64");
+
+  if (rawBytes.length > TX_SIZE_LIMIT_BYTES) {
+    throw new Error(
+      `tx_too_large: Jupiter returned ${rawBytes.length} bytes (limit ${TX_SIZE_LIMIT_BYTES})`,
+    );
+  }
+
+  // Re-sign with our key against a fresh blockhash before simulation and submission.
   const latestBlockhash = await connection.getLatestBlockhash("confirmed");
-  const addressesByLookupTableAddress = await connection.fetchLookupTableAddresses(
-    swapInstructions.addressLookupTableAddresses.map((lookupTableAddress) =>
-      address(lookupTableAddress),
-    ),
+
+  const { VersionedTransaction } = await import("@solana/web3.js");
+  const vt = VersionedTransaction.deserialize(rawBytes);
+  vt.message.recentBlockhash = latestBlockhash.blockhash;
+
+  const keyPair = await crypto.subtle.importKey(
+    "raw",
+    wallet.keyPair.privateKey instanceof CryptoKey
+      ? await crypto.subtle.exportKey("raw", wallet.keyPair.privateKey)
+      : wallet.keyPair.privateKey,
+    { name: "Ed25519" },
+    false,
+    ["sign"],
   );
+  const msgBytes = vt.message.serialize();
+  const sigBytes = await crypto.subtle.sign("Ed25519", keyPair, msgBytes);
+  vt.signatures[0] = new Uint8Array(sigBytes);
 
-  // First pass: build with a placeholder fee to get a serialized tx for the fee estimate.
-  // Use signTransactionMessageWithSigners directly (not the instrumented wrapper) so the
-  // signing metric and flow-dry-run boundary check fire only once, on the real submission tx.
-  const firstPassTransaction = await signTransactionMessageWithSigners(
-    createSwapTransactionMessage({
-      wallet,
-      swapInstructions,
-      latestBlockhash,
-      addressesByLookupTableAddress,
-      computeUnitLimit: FIXED_COMPUTE_UNIT_LIMIT,
-      priorityFeeMicroLamports: 0n,
-      additionalInstructions,
-    }),
-  );
+  const signedBase64 = Buffer.from(vt.serialize()).toString("base64") as Base64EncodedWireTransaction;
 
-  const firstPassBase64 = getBase64EncodedWireTransaction(firstPassTransaction);
-  const firstPassBase58 = bs58.encode(Buffer.from(firstPassBase64, "base64"));
-
-  // Fetch the real priority fee with transaction context for accurate account-aware estimate.
-  const priorityFeeMicroLamports = await priorityFeeClient.getPriorityFeeEstimate(firstPassBase58);
-
-  const simulation = await connection.simulateTransaction(firstPassBase64);
+  // Simulate with replaceRecentBlockhash so stale blockhashes don't cause false failures.
+  const simulation = await connection.simulateTransaction(signedBase64);
   if (simulation.err) {
     throw new Error(`swap simulation failed: ${JSON.stringify(simulation.err)}`);
   }
-  if (!simulation.unitsConsumed || simulation.unitsConsumed <= 0n) {
-    throw new Error("swap simulation did not return units consumed");
-  }
-
-  const computedUnitLimit = Math.ceil(Number(simulation.unitsConsumed) * 1.15);
-  const transactionMessage = createSwapTransactionMessage({
-    wallet,
-    swapInstructions,
-    latestBlockhash,
-    addressesByLookupTableAddress,
-    computeUnitLimit: computedUnitLimit,
-    priorityFeeMicroLamports,
-    additionalInstructions,
-  });
 
   return {
-    transaction: await signSwapTransaction(transactionMessage),
-    lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
-    latestBlockhash: {
-      blockhash: latestBlockhash.blockhash,
-      lastValidBlockHeight: BigInt(latestBlockhash.lastValidBlockHeight),
-    },
+    transaction: {
+      [Symbol.for("@solana/kit/transaction")]: true,
+      messageBytes: msgBytes,
+      signatures: { [wallet.address]: vt.signatures[0] as unknown as import("@solana/kit").SignatureBytes },
+      _wireTransaction: signedBase64,
+    } as unknown as Awaited<ReturnType<typeof signTransactionMessageWithSigners>>,
   };
 }
 
 async function submitBuiltTransaction(input: {
   deps: ExecutorDependencies;
-  builtTransaction: Awaited<ReturnType<typeof buildSwapTransaction>>;
+  lastValidBlockHeight: number;
   signedWireTransaction: Base64EncodedWireTransaction;
   submissionState: { markAttempted(): void };
 }): Promise<SubmissionPath> {
@@ -873,6 +806,20 @@ async function submitBuiltTransaction(input: {
     }
 
     try {
+      const latestBlockhash = await input.deps.connection.getLatestBlockhash("confirmed");
+      const tipTx = await createHeliusSenderTipTransaction({
+        wallet: input.deps.wallet,
+        tipAccount: input.deps.heliusSenderClient.getTipAccount(),
+        tipLamports: input.deps.heliusSenderTipLamports ?? BigInt(config.HELIUS_SENDER_TIP_LAMPORTS),
+        latestBlockhash: {
+          blockhash: latestBlockhash.blockhash,
+          lastValidBlockHeight: BigInt(latestBlockhash.lastValidBlockHeight),
+        },
+      });
+      await input.deps.heliusSenderClient.sendTransaction(tipTx.base64WireTransaction, {
+        skipPreflight: true,
+        maxRetries: 0,
+      });
       await input.deps.heliusSenderClient.sendTransaction(input.signedWireTransaction, {
         skipPreflight: true,
         maxRetries: 0,
@@ -901,11 +848,15 @@ async function submitBuiltTransaction(input: {
     }
 
     try {
+      const latestBlockhash = await input.deps.connection.getLatestBlockhash("confirmed");
       const tipTransaction = await createJitoTipTransaction({
         wallet: input.deps.wallet,
         tipAccount: await input.deps.jitoClient.getTipAccount(),
         tipLamports: input.deps.jitoTipLamports ?? BigInt(config.JITO_TIP_LAMPORTS),
-        latestBlockhash: input.builtTransaction.latestBlockhash,
+        latestBlockhash: {
+          blockhash: latestBlockhash.blockhash,
+          lastValidBlockHeight: BigInt(latestBlockhash.lastValidBlockHeight),
+        },
       });
       const bundleId = await input.deps.jitoClient.submitBundle([
         tipTransaction.base64WireTransaction,
@@ -950,104 +901,40 @@ function resolveSubmissionMode(deps: ExecutorDependencies): SubmissionMode {
   return "rpc";
 }
 
+const RPC_REBROADCAST_INTERVAL_MS = 2_000;
+
 async function submitViaRpc(input: {
   deps: ExecutorDependencies;
+  lastValidBlockHeight: number;
   signedWireTransaction: Base64EncodedWireTransaction;
   submissionState: { markAttempted(): void };
 }): Promise<void> {
   input.submissionState.markAttempted();
+  tradesSubmitted.inc({ path: "rpc" });
+
+  // Initial submission
   await input.deps.connection.sendTransaction(input.signedWireTransaction, {
     skipPreflight: true,
     maxRetries: 0,
   });
-  tradesSubmitted.inc({ path: "rpc" });
-}
 
-async function signSwapTransaction(
-  transactionMessage: Parameters<typeof signTransactionMessageWithSigners>[0],
-): Promise<Awaited<ReturnType<typeof signTransactionMessageWithSigners>>> {
-  return signTransactionMessageWithSigners(transactionMessage);
-}
-
-function createSwapTransactionMessage(input: {
-  wallet: Awaited<ReturnType<typeof getTradingSigner>>;
-  swapInstructions: SwapInstructionsResponse;
-  latestBlockhash: { blockhash: Blockhash; lastValidBlockHeight: number };
-  addressesByLookupTableAddress: Record<Address, Address[]>;
-  computeUnitLimit: number;
-  priorityFeeMicroLamports: bigint;
-  additionalInstructions?: TransactionInstruction[];
-}) {
-  return compressTransactionMessageUsingAddressLookupTables(
-    pipe(
-      createTransactionMessage({ version: 0 }),
-      (message) => setTransactionMessageFeePayerSigner(input.wallet, message),
-      (message) =>
-        setTransactionMessageLifetimeUsingBlockhash(
-          {
-            blockhash: input.latestBlockhash.blockhash,
-            lastValidBlockHeight: BigInt(input.latestBlockhash.lastValidBlockHeight),
-          },
-          message,
-        ),
-      (message) => setTransactionMessageComputeUnitLimit(input.computeUnitLimit, message),
-      (message) =>
-        setTransactionMessageComputeUnitPrice(input.priorityFeeMicroLamports, message),
-      (message) =>
-        appendTransactionMessageInstructions(
-          [
-            ...decodeInstructionGroup(input.swapInstructions.otherInstructions),
-            ...decodeInstructionGroup(input.swapInstructions.setupInstructions),
-            decodeInstruction(input.swapInstructions.swapInstruction),
-            ...decodeOptionalInstruction(input.swapInstructions.cleanupInstruction),
-            ...(input.additionalInstructions ?? []),
-          ],
-          message,
-        ),
-    ),
-    input.addressesByLookupTableAddress,
-  );
-}
-
-function decodeInstructionGroup(
-  instructions: SwapInstructionsResponse["setupInstructions"],
-) {
-  return instructions.map((instruction) => decodeInstruction(instruction));
-}
-
-function decodeOptionalInstruction(
-  instruction: SwapInstructionsResponse["cleanupInstruction"] | undefined,
-) {
-  return instruction ? [decodeInstruction(instruction)] : [];
-}
-
-function decodeInstruction(
-  instruction: NonNullable<SwapInstructionsResponse["swapInstruction"]>,
-) {
-  return {
-    programAddress: address(instruction.programId),
-    accounts: instruction.accounts.map((account) => ({
-      address: address(account.pubkey),
-      role: toAccountRole(account.isSigner, account.isWritable),
-    })),
-    data: Uint8Array.from(Buffer.from(instruction.data, "base64")),
-  };
-}
-
-function toAccountRole(isSigner: boolean, isWritable: boolean): AccountRole {
-  if (isSigner && isWritable) {
-    return AccountRole.WRITABLE_SIGNER;
+  // Rebroadcast every 2s until block height expires (Helius/Jito handle retransmission themselves).
+  const startedAt = input.deps.now();
+  while (input.deps.now() - startedAt < CONFIRM_TIMEOUT_MS) {
+    await input.deps.sleep(RPC_REBROADCAST_INTERVAL_MS);
+    const blockHeight = await input.deps.connection.getBlockHeight("confirmed");
+    if (blockHeight > input.lastValidBlockHeight) {
+      break;
+    }
+    try {
+      await input.deps.connection.sendTransaction(input.signedWireTransaction, {
+        skipPreflight: true,
+        maxRetries: 0,
+      });
+    } catch {
+      // Ignore rebroadcast errors — tx may already be confirmed.
+    }
   }
-
-  if (isSigner) {
-    return AccountRole.READONLY_SIGNER;
-  }
-
-  if (isWritable) {
-    return AccountRole.WRITABLE;
-  }
-
-  return AccountRole.READONLY;
 }
 
 async function pollForConfirmation(

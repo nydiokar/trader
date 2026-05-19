@@ -1,11 +1,21 @@
 import {
   AccountRole,
   address,
+  appendTransactionMessageInstructions,
+  createTransactionMessage,
+  getBase64EncodedWireTransaction,
+  getSignatureFromTransaction,
+  pipe,
+  setTransactionMessageFeePayerSigner,
+  setTransactionMessageLifetimeUsingBlockhash,
+  signTransactionMessageWithSigners,
   type Address,
   type Base64EncodedWireTransaction,
+  type Blockhash,
   type Signature,
 } from "@solana/kit";
 import { config } from "../config.js";
+import { getTradingSigner } from "../solana/runtime.js";
 
 const SYSTEM_PROGRAM_ADDRESS = address("11111111111111111111111111111111");
 
@@ -107,22 +117,39 @@ export function selectHeliusSenderTipAccount(): Address {
   return address(HELIUS_SENDER_TIP_ACCOUNTS[index] ?? HELIUS_SENDER_TIP_ACCOUNTS[0]);
 }
 
-export function createHeliusSenderTipInstruction(input: {
-  source: Address;
+export async function createHeliusSenderTipTransaction(input: {
+  wallet: Awaited<ReturnType<typeof getTradingSigner>>;
   tipAccount: Address;
   tipLamports: bigint;
-}) {
+  latestBlockhash: { blockhash: Blockhash; lastValidBlockHeight: bigint };
+}): Promise<{
+  signature: string;
+  base64WireTransaction: Base64EncodedWireTransaction;
+}> {
   const data = new Uint8Array(12);
   const view = new DataView(data.buffer);
   view.setUint32(0, 2, true);
   view.setBigUint64(4, input.tipLamports, true);
 
-  return {
+  const instruction = {
     programAddress: SYSTEM_PROGRAM_ADDRESS,
     accounts: [
-      { address: input.source, role: AccountRole.WRITABLE_SIGNER },
+      { address: address(input.wallet.address), role: AccountRole.WRITABLE_SIGNER },
       { address: input.tipAccount, role: AccountRole.WRITABLE },
     ],
     data,
+  };
+
+  const message = pipe(
+    createTransactionMessage({ version: 0 }),
+    (current) => setTransactionMessageFeePayerSigner(input.wallet, current),
+    (current) => setTransactionMessageLifetimeUsingBlockhash(input.latestBlockhash, current),
+    (current) => appendTransactionMessageInstructions([instruction], current),
+  );
+  const transaction = await signTransactionMessageWithSigners(message);
+
+  return {
+    signature: getSignatureFromTransaction(transaction).toString(),
+    base64WireTransaction: getBase64EncodedWireTransaction(transaction),
   };
 }

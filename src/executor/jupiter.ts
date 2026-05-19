@@ -1,7 +1,7 @@
 import {
   createJupiterApiClient,
   type QuoteResponse,
-  type SwapInstructionsResponse,
+  type SwapResponse,
 } from "@jup-ag/api";
 import { config } from "../config.js";
 import { quoteLatencySeconds } from "../metrics/registry.js";
@@ -113,21 +113,24 @@ export async function getQuoteForSwap(
   }
 }
 
-export async function getSwapInstructions(
+export async function getSwap(
   quote: QuoteResponse,
   walletPublicKey: string,
-): Promise<SwapInstructionsResponse> {
+  computeUnitPriceMicroLamports: number,
+): Promise<SwapResponse> {
   try {
-    return await jupiter.swapInstructionsPost({
+    return await jupiter.swapPost({
       swapRequest: {
         userPublicKey: walletPublicKey,
         quoteResponse: quote,
         wrapAndUnwrapSol: true,
         asLegacyTransaction: false,
+        computeUnitPriceMicroLamports,
+        dynamicComputeUnitLimit: true,
       },
     });
   } catch (error) {
-    throw normalizeJupiterError(error, "failed to fetch Jupiter swap instructions");
+    throw normalizeJupiterError(error, "failed to fetch Jupiter swap transaction");
   }
 }
 

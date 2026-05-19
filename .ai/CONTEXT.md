@@ -239,7 +239,6 @@ M4 task scaffold: `.ai/milestones/M4.md`
 - [x] Explicit gates: `live_execution_enabled=true`, `DRY_RUN=false`, kill switch off, wallet floor, daily SOL cap, per-trade SOL cap, max open positions.
 - [x] Per-signal live gates: signal freshness, no existing open position for mint, cooldown, wallet floor after input+buffer.
 - [x] Bounded rebuild logic for pre-submit failures only; no retry after Sender/Jito/RPC acceptance.
-- [ ] Wire Flow live delivery into bot trading path without changing `/flow/dry-run-signal` semantics.
 - [ ] Canary visibility fields: quoted/actual out, slippage bps, price impact, priority fee, Sender tip, base fee, rent delta, total wallet delta, submit path, confirmation latency, failure category, explorer URL.
 - [ ] Fix `trades.slippageActual` naming — today includes rent/setup/tip effects; need separate true swap-slippage metric.
 - [ ] `pnpm canary:report` — summarize last N live canaries by landing rate, p50/p95, failure categories, wallet delta.

@@ -30,15 +30,12 @@ export type JitoClient = {
 export function createJitoClient(
   blockEngineUrl = config.JITO_BLOCK_ENGINE_URL,
 ): JitoClient {
-  let cachedTipAccount: Address | undefined;
-
   return {
     async submitBundle(transactionsBase64) {
       return submitBundle(blockEngineUrl, transactionsBase64);
     },
     async getTipAccount() {
-      cachedTipAccount ??= await getTipAccount(blockEngineUrl);
-      return cachedTipAccount;
+      return getTipAccount(blockEngineUrl);
     },
   };
 }
@@ -120,12 +117,13 @@ export async function getTipAccount(blockEngineUrl: string): Promise<Address> {
   if (payload.error) {
     throw new JitoSyncError(payload.error.message ?? "jito tip account JSON-RPC error");
   }
-  const [tipAccount] = payload.result ?? [];
-  if (!tipAccount) {
+  const accounts = payload.result ?? [];
+  if (accounts.length === 0) {
     throw new JitoSyncError("jito tip account response missing result");
   }
 
-  return address(tipAccount);
+  const tipAccount = accounts[Math.floor(Math.random() * accounts.length)];
+  return address(tipAccount!);
 }
 
 export async function createJitoTipTransaction(input: {
