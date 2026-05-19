@@ -99,11 +99,13 @@ async function postExit(app: Awaited<ReturnType<typeof makeApp>>["app"], payload
   });
 }
 
-async function makeExitModule(dbPath: string) {
+async function makeExitModule(dbPath: string, opts: { keepTokensIngestUrl?: boolean } = {}) {
   // Always clear poll-related env before importing config so validation passes
   process.env["FLOW_EXIT_POLL_ENABLED"] = "false";
-  delete process.env["TOKENS_INGEST_BASE_URL"];
-  delete process.env["TOKENS_INGEST_SERVICE_SECRET"];
+  if (!opts.keepTokensIngestUrl) {
+    delete process.env["TOKENS_INGEST_BASE_URL"];
+    delete process.env["TOKENS_INGEST_SERVICE_SECRET"];
+  }
 
   process.env["DATABASE_URL"] = `file:${dbPath}`;
   process.env["WALLET_PRIVATE_KEY_BASE58"] = "A".repeat(88);
@@ -199,7 +201,7 @@ describe("close_pending recovery", () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, text: async () => "ok" });
     vi.stubGlobal("fetch", fetchMock);
 
-    const ctx = await makeExitModule(dbPath);
+    const ctx = await makeExitModule(dbPath, { keepTokensIngestUrl: true });
     try {
       const stuckSignal = JSON.stringify({
         schema_version: "flow_exit_signal_v1",
@@ -263,7 +265,7 @@ describe("close_pending recovery", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const ctx = await makeExitModule(dbPath);
+    const ctx = await makeExitModule(dbPath, { keepTokensIngestUrl: true });
     try {
       const stuckSignal = JSON.stringify({
         schema_version: "flow_exit_signal_v1",

@@ -11,7 +11,10 @@ describe("telegram notifications", () => {
   });
 
   it("posts notifications to Telegram when configured", async () => {
-    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ result: { message_id: 1 } }),
+    });
     vi.stubGlobal("fetch", fetchMock);
     const { notify } = await import("../src/notify/telegram.js");
 

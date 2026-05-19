@@ -173,6 +173,7 @@ export async function handleFlowExitSignal(signal: FlowExitSignal): Promise<Flow
     tokenAmountRaw,
     maxSlippageBps: settings.maxSlippageBps,
   });
+  exitSellToConfirmSeconds.observe((Date.now() - sellStart) / 1000);
 
   if (result.state !== "done" || result.response.status !== "confirmed") {
     const error = result.decision;
@@ -203,7 +204,6 @@ export async function handleFlowExitSignal(signal: FlowExitSignal): Promise<Flow
     };
   }
 
-  exitSellToConfirmSeconds.observe((Date.now() - sellStart) / 1000);
   exitsConfirmed.labels("false").inc();
 
   const solReceived = result.response.sol_received;
@@ -427,6 +427,7 @@ async function refreshClosePendingGauge(): Promise<void> {
 }
 
 const CLOSE_PENDING_ALERT_MINUTES = 10;
+const CLOSE_PENDING_ESCALATION_MINUTES = 30;
 
 export type RecoverClosePendingResult = {
   recovered: number;
@@ -466,8 +467,13 @@ export async function recoverClosePending(): Promise<RecoverClosePendingResult> 
     }
 
     const stuckMs = now - row.updatedAt.getTime();
-    if (stuckMs > alertThresholdMs) {
-      const stuckMinutes = Math.floor(stuckMs / 60_000);
+    const stuckMinutes = Math.floor(stuckMs / 60_000);
+    const escalationThresholdMs = CLOSE_PENDING_ESCALATION_MINUTES * 60 * 1000;
+    // Alert at the 10-min mark and again at the 30-min mark — not on every poll pass
+    const alertWindowMs = 10 * 60 * 1000; // 10-minute window around each threshold
+    const crossedInitialThreshold = stuckMs >= alertThresholdMs && stuckMs < alertThresholdMs + alertWindowMs;
+    const crossedEscalationThreshold = stuckMs >= escalationThresholdMs && stuckMs < escalationThresholdMs + alertWindowMs;
+    if (crossedInitialThreshold || crossedEscalationThreshold) {
       notify(
         formatClosePendingAlert({
           tokenMint: row.tokenMint,

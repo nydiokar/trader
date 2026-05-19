@@ -33,7 +33,7 @@ Canonical spec: `solana-signal-bot-spec-v2.md`
 | M4 | Mainnet production executor | 3 days | **In progress** | >= 90% landing rate, p95 <= 15s, zero double-spends, all metrics populated |
 | M5 | Jito integration | 2 days | **Implemented, live blocked** | >= 95% landing rate, p95 <= 10s, fallback path tested, UNCERTAIN state proven safe |
 | M6 | Risk layer | 1 day | **Partially implemented** | Every blocker has a test; kill switch verified in prod |
-| M7 | Observability | 0.5 day | **Implemented** | All lifecycle Telegram events wired; staging verification pending real bot token |
+| M7 | Observability | 0.5 day | **Implemented** | All lifecycle Telegram events wired; |
 | M8 | Canary period | 1 week calendar | **Not started** | 5-7 days live with tiny caps, no UNCERTAIN states, >= 95% landing |
 | M9 | Production size-up | Ongoing | **Not started** | One full week at target size with SLOs met |
 

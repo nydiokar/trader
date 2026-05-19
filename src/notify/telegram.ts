@@ -1,28 +1,50 @@
 import { config } from "../config.js";
 import { logger } from "../logger.js";
 
+export type NotifyResult =
+  | { sent: true; messageId: number }
+  | { sent: false; reason: "disabled" };
+
 export async function notify(message: string): Promise<void> {
+  await notifyWithResult(message);
+}
+
+const NOTIFY_TIMEOUT_MS = 5_000;
+
+export async function notifyWithResult(message: string): Promise<NotifyResult> {
   if (!config.TRADE_TELEGRAM_BOT_TOKEN || !config.TRADE_TELEGRAM_CHAT_ID) {
     logger.debug("telegram notification skipped because config is missing");
-    return;
+    return { sent: false, reason: "disabled" };
   }
 
-  const response = await fetch(
-    `https://api.telegram.org/bot${config.TRADE_TELEGRAM_BOT_TOKEN}/sendMessage`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: config.TRADE_TELEGRAM_CHAT_ID,
-        text: message,
-        parse_mode: "HTML",
-        link_preview_options: { is_disabled: true },
-      }),
-    },
-  );
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), NOTIFY_TIMEOUT_MS);
 
-  if (!response.ok) {
-    throw new Error(`telegram notification failed with HTTP ${response.status}`);
+  try {
+    const response = await fetch(
+      `https://api.telegram.org/bot${config.TRADE_TELEGRAM_BOT_TOKEN}/sendMessage`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id: config.TRADE_TELEGRAM_CHAT_ID,
+          text: message,
+          parse_mode: "HTML",
+          link_preview_options: { is_disabled: true },
+        }),
+        signal: controller.signal,
+      },
+    );
+
+    if (!response.ok) {
+      throw new Error(`telegram notification failed with HTTP ${response.status}`);
+    }
+
+    const body = (await response.json()) as { result?: { message_id?: number } };
+    const messageId = body.result?.message_id ?? 0;
+    return { sent: true, messageId };
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 

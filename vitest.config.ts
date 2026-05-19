@@ -7,6 +7,8 @@ export default defineConfig({
     include: ["src/**/*.test.ts", "tests/**/*.test.ts"],
     env: {
       LOG_LEVEL: "silent",
+      TRADE_TELEGRAM_BOT_TOKEN: "",
+      TRADE_TELEGRAM_CHAT_ID: "",
     },
   },
 });
