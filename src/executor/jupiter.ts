@@ -4,8 +4,7 @@ import {
   type SwapInstructionsResponse,
 } from "@jup-ag/api";
 import { config } from "../config.js";
-import { assertExecutorPathNotReachableFromFlowDryRun } from "../flow/execution-boundary.js";
-import { executorPathReachability, quoteLatencySeconds } from "../metrics/registry.js";
+import { quoteLatencySeconds } from "../metrics/registry.js";
 
 export const WSOL_MINT = "So11111111111111111111111111111111111111112";
 
@@ -63,8 +62,6 @@ export async function getQuoteForSwap(
   amountRaw: string,
   maxSlippageBps: number,
 ): Promise<QuoteResponse> {
-  assertExecutorPathNotReachableFromFlowDryRun("jupiter_quote");
-  executorPathReachability.inc({ path: "jupiter_quote" });
   const stopTimer = quoteLatencySeconds.startTimer();
 
   try {
@@ -120,8 +117,6 @@ export async function getSwapInstructions(
   quote: QuoteResponse,
   walletPublicKey: string,
 ): Promise<SwapInstructionsResponse> {
-  assertExecutorPathNotReachableFromFlowDryRun("jupiter_swap_instructions");
-  executorPathReachability.inc({ path: "jupiter_swap_instructions" });
   try {
     return await jupiter.swapInstructionsPost({
       swapRequest: {

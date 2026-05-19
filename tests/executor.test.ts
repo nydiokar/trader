@@ -326,7 +326,6 @@ describe("M3 executor", () => {
       },
       {
         wallet,
-        dryRun: true,
         now: vi.fn().mockReturnValue(1_000),
         sleep: vi.fn().mockResolvedValue(undefined),
         quoteClient: {

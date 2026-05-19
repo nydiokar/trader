@@ -71,7 +71,6 @@ export class FlowExitPoller {
               {
                 position_id: result.position_id,
                 status: result.status,
-                dry_run: result.dry_run,
                 error: result.error,
               },
               "flow exit poll handled signal",

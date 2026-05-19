@@ -14,8 +14,6 @@ import {
   type Blockhash,
 } from "@solana/kit";
 import { config } from "../config.js";
-import { assertExecutorPathNotReachableFromFlowDryRun } from "../flow/execution-boundary.js";
-import { executorPathReachability } from "../metrics/registry.js";
 import { getTradingSigner } from "../solana/runtime.js";
 
 const SYSTEM_PROGRAM_ADDRESS = address("11111111111111111111111111111111");
@@ -150,8 +148,6 @@ export async function createJitoTipTransaction(input: {
     (current) => setTransactionMessageLifetimeUsingBlockhash(input.latestBlockhash, current),
     (current) => appendTransactionMessageInstructions([instruction], current),
   );
-  assertExecutorPathNotReachableFromFlowDryRun("signing");
-  executorPathReachability.inc({ path: "signing" });
   const transaction = await signTransactionMessageWithSigners(message);
 
   return {

@@ -51,9 +51,6 @@ const ConfigSchema = z.object({
   // Webhook
   WEBHOOK_SECRET: z.string().min(32),
   WEBHOOK_PORT: z.coerce.number().int().positive().default(8089),
-  FLOW_DRY_RUN_WEBHOOK_SECRET: z.string().min(32).optional(),
-  FLOW_EXECUTION_JOURNAL_DIR: z.string().default("data/execution-journals"),
-  FLOW_DRY_RUN_PRODUCTION_TRIAL: booleanEnv("false"),
   TOKENS_INGEST_BASE_URL: z.string().url().optional(),
   TOKENS_INGEST_SERVICE_SECRET: z.string().min(32).optional(),
   FLOW_EXIT_POLL_ENABLED: booleanEnv("false"),
@@ -97,15 +94,7 @@ const ConfigSchema = z.object({
 }).transform((value) => ({
   ...value,
   HELIUS_RPC_URL: withHeliusApiKey(value.HELIUS_RPC_URL, value.HELIUS_API_KEY),
-})).superRefine((value, ctx) => {
-  if (value.FLOW_EXIT_POLL_ENABLED && !value.TOKENS_INGEST_BASE_URL) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ["TOKENS_INGEST_BASE_URL"],
-      message: "required when FLOW_EXIT_POLL_ENABLED=true",
-    });
-  }
-});
+}));
 
 // Startup validation — exits with code 1 on failure (spec §6.2)
 const parsed = ConfigSchema.safeParse(process.env);

@@ -103,7 +103,7 @@ async function defaultDependencies(): Promise<BlockerDependencies> {
       WALLET_SOL_FLOOR: settings.walletFloorSol,
       FEE_BUFFER_SOL: settings.feeBufferSol,
       LIVE_EXECUTION_ENABLED: settings.liveExecutionEnabled,
-      REQUIRE_LIVE_EXECUTION_ENABLED: !resolveDryRunMode(),
+      REQUIRE_LIVE_EXECUTION_ENABLED: true,
     },
     now: () => Date.now(),
     async getWalletSol() {
@@ -151,13 +151,6 @@ async function defaultDependencies(): Promise<BlockerDependencies> {
       return row !== null;
     },
   };
-}
-
-function resolveDryRunMode(): boolean {
-  const raw = process.env["DRY_RUN"];
-  if (raw === "true") return true;
-  if (raw === "false") return false;
-  return config.DRY_RUN;
 }
 
 function getUtcStartOfDaySeconds(nowMs: number): number {

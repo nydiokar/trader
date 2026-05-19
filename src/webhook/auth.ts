@@ -16,18 +16,6 @@ export async function verifyHmac(
   await verifyHmacWithSecret(request, reply, config.WEBHOOK_SECRET);
 }
 
-export async function verifyFlowDryRunHmac(
-  request: FastifyRequest,
-  reply: FastifyReply,
-): Promise<void> {
-  if (!config.FLOW_DRY_RUN_WEBHOOK_SECRET) {
-    await reply.code(503).send({ error: "flow dry-run webhook auth is not configured" });
-    return;
-  }
-
-  await verifyHmacWithSecret(request, reply, config.FLOW_DRY_RUN_WEBHOOK_SECRET);
-}
-
 async function verifyHmacWithSecret(
   request: FastifyRequest,
   reply: FastifyReply,

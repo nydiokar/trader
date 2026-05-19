@@ -25,13 +25,11 @@ import { db } from "../db/index.js";
 import { logger } from "../logger.js";
 import {
   signalToConfirmSeconds,
-  executorPathReachability,
   submitToConfirmSeconds,
   tradesConfirmed,
   tradesSubmitted,
 } from "../metrics/registry.js";
 import { getSolanaRpc, getTradingSigner } from "../solana/runtime.js";
-import { assertExecutorPathNotReachableFromFlowDryRun } from "../flow/execution-boundary.js";
 import {
   createJitoClient,
   createJitoTipTransaction,
@@ -131,7 +129,6 @@ type ExecutorDependencies = {
   submissionFallbackRpc?: boolean;
   heliusSenderTipLamports?: bigint;
   jitoTipLamports?: bigint;
-  dryRun?: boolean;
   notify?: NotifyFn;
   querySloWindow?: SloQueryFn;
   sloWindowHours?: number;
@@ -147,7 +144,6 @@ type PersistedTrade = {
   amountOutActual?: number;
   slippageActual?: number;
   submitToConfirmSeconds?: number;
-  dryRun?: boolean;
 };
 
 type ConfirmedTransactionDetails = {
@@ -217,7 +213,6 @@ function defaultDependencies(): Promise<ExecutorDependencies> {
     submissionFallbackRpc: config.SUBMISSION_FALLBACK_RPC,
     heliusSenderTipLamports: BigInt(config.HELIUS_SENDER_TIP_LAMPORTS),
     jitoTipLamports: BigInt(config.JITO_TIP_LAMPORTS),
-    dryRun: resolveDryRunMode(),
     notify,
     querySloWindow: defaultSloQuery,
     sloWindowHours: config.SLO_WINDOW_HOURS,
@@ -227,13 +222,6 @@ function defaultDependencies(): Promise<ExecutorDependencies> {
     ...deps,
     wallet: await getTradingSigner(),
   }));
-}
-
-function resolveDryRunMode(): boolean {
-  const raw = process.env["DRY_RUN"];
-  if (raw === "true") return true;
-  if (raw === "false") return false;
-  return config.DRY_RUN;
 }
 
 export async function executeSignal(
@@ -299,13 +287,9 @@ export async function executeTokenSellWithDependencies(
     signature?: string;
     submitted_via?: SubmissionPath;
     sol_received?: number;
-    dry_run?: boolean;
     error_kind?: string;
   };
 }> {
-  assertExecutorPathNotReachableFromFlowDryRun("executor_trading");
-  executorPathReachability.inc({ path: "executor_trading" });
-
   let signature: Signature | undefined;
   let submissionAttempted = false;
 
@@ -332,21 +316,6 @@ export async function executeTokenSellWithDependencies(
     const signedWireTransaction = getBase64EncodedWireTransaction(
       builtTransaction.transaction,
     );
-
-    if (deps.dryRun === true) {
-      const submittedVia = resolveSubmissionMode(deps);
-      return {
-        state: "done",
-        decision: "accepted",
-        response: {
-          status: "confirmed",
-          exit_id: input.exitId,
-          signature: `dry-run:${signature.toString()}`,
-          submitted_via: submittedVia,
-          dry_run: true,
-        },
-      };
-    }
 
     const submittedVia = await submitBuiltTransaction({
       deps,
@@ -434,8 +403,6 @@ export async function executeSignalWithDependencies(
   decision: string;
   response: unknown;
 }> {
-  assertExecutorPathNotReachableFromFlowDryRun("executor_trading");
-  executorPathReachability.inc({ path: "executor_trading" });
   const stopTimer = signalToConfirmSeconds.startTimer();
   const createdAt = Math.floor(deps.now() / 1000);
 
@@ -468,39 +435,6 @@ export async function executeSignalWithDependencies(
     const signedWireTransaction = getBase64EncodedWireTransaction(
       builtTransaction.transaction,
     );
-
-    if (deps.dryRun === true) {
-      const syntheticSignature = `dry-run:${signature.toString()}`;
-      const submittedVia = resolveSubmissionMode(deps);
-      logger.info(
-        {
-          signal_id: input.signalId,
-          signature: syntheticSignature,
-          signed_transaction_base64: signedWireTransaction,
-        },
-        "executor dry run built signed transaction without submission",
-      );
-
-      await writeTrade(input, createdAt, deps.now(), {
-        signature: syntheticSignature,
-        state: "confirmed",
-        submittedVia,
-        dryRun: true,
-      });
-      stopTimer();
-
-      return {
-        state: "done",
-        decision: "accepted",
-        response: {
-          status: "confirmed",
-          signal_id: input.signalId,
-          signature: syntheticSignature,
-          submitted_via: submittedVia,
-          dry_run: true,
-        },
-      };
-    }
 
     submittedVia = await submitBuiltTransaction({
       deps,
@@ -939,8 +873,6 @@ async function submitBuiltTransaction(input: {
     }
 
     try {
-      assertExecutorPathNotReachableFromFlowDryRun("transaction_submission");
-      executorPathReachability.inc({ path: "transaction_submission" });
       await input.deps.heliusSenderClient.sendTransaction(input.signedWireTransaction, {
         skipPreflight: true,
         maxRetries: 0,
@@ -975,8 +907,6 @@ async function submitBuiltTransaction(input: {
         tipLamports: input.deps.jitoTipLamports ?? BigInt(config.JITO_TIP_LAMPORTS),
         latestBlockhash: input.builtTransaction.latestBlockhash,
       });
-      assertExecutorPathNotReachableFromFlowDryRun("transaction_submission");
-      executorPathReachability.inc({ path: "transaction_submission" });
       const bundleId = await input.deps.jitoClient.submitBundle([
         tipTransaction.base64WireTransaction,
         input.signedWireTransaction,
@@ -1026,8 +956,6 @@ async function submitViaRpc(input: {
   submissionState: { markAttempted(): void };
 }): Promise<void> {
   input.submissionState.markAttempted();
-  assertExecutorPathNotReachableFromFlowDryRun("transaction_submission");
-  executorPathReachability.inc({ path: "transaction_submission" });
   await input.deps.connection.sendTransaction(input.signedWireTransaction, {
     skipPreflight: true,
     maxRetries: 0,
@@ -1038,8 +966,6 @@ async function submitViaRpc(input: {
 async function signSwapTransaction(
   transactionMessage: Parameters<typeof signTransactionMessageWithSigners>[0],
 ): Promise<Awaited<ReturnType<typeof signTransactionMessageWithSigners>>> {
-  assertExecutorPathNotReachableFromFlowDryRun("signing");
-  executorPathReachability.inc({ path: "signing" });
   return signTransactionMessageWithSigners(transactionMessage);
 }
 
@@ -1183,7 +1109,6 @@ function toPersistedTrade(
     amountOutActual: reconciliation?.ok ? reconciliation.amountOutActual : undefined,
     slippageActual: reconciliation?.ok ? reconciliation.slippageActual : undefined,
     submitToConfirmSeconds,
-    dryRun: false,
     errorMsg:
       outcome === "confirmed"
         ? reconciliation?.ok === false
@@ -1435,7 +1360,6 @@ async function writeTrade(
       signature: trade.signature,
       state: trade.state,
       submittedVia: trade.submittedVia,
-      dryRun: trade.dryRun ?? false,
       errorMsg: trade.errorMsg,
       confirmedAt: trade.state === "confirmed" ? Math.floor(nowMs / 1000) : null,
     },
@@ -1449,7 +1373,6 @@ async function writeTrade(
       signature: trade.signature,
       state: trade.state,
       submittedVia: trade.submittedVia,
-      dryRun: trade.dryRun ?? false,
       createdAt,
       confirmedAt: trade.state === "confirmed" ? Math.floor(nowMs / 1000) : null,
       errorMsg: trade.errorMsg,

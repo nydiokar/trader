@@ -35,11 +35,6 @@ async function main(): Promise<void> {
 }
 
 async function validateStartupReadiness(): Promise<void> {
-  await validateFlowDryRunStorageReadiness();
-  if (config.FLOW_DRY_RUN_PRODUCTION_TRIAL && !config.FLOW_DRY_RUN_WEBHOOK_SECRET) {
-    throw new Error("FLOW_DRY_RUN_WEBHOOK_SECRET is required for Flow production dry-run trial");
-  }
-
   const signer = await getTradingSigner();
   const rpc = getSolanaRpc();
 
@@ -55,15 +50,6 @@ async function validateStartupReadiness(): Promise<void> {
       last_valid_block_height: latestBlockhash.value.lastValidBlockHeight.toString(),
     },
     "startup wallet and RPC readiness validated",
-  );
-}
-
-async function validateFlowDryRunStorageReadiness(): Promise<void> {
-  await db.$queryRaw`SELECT 1 FROM execution_journal LIMIT 1`;
-  await db.$queryRaw`SELECT 1 FROM flow_dry_run_attempt LIMIT 1`;
-  logger.info(
-    { flow_dry_run_live_execution_enabled: false },
-    "flow dry-run journal storage readiness validated",
   );
 }
 

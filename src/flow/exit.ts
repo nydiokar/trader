@@ -42,7 +42,6 @@ type ExitPositionRow = {
 
 type FlowExitResult = {
   status:
-    | "dry_run_journaled"
     | "closed"
     | "failed"
     | "already_processed"
@@ -51,7 +50,6 @@ type FlowExitResult = {
   position_id: string;
   journal_id: string;
   signature?: string;
-  dry_run: boolean;
   error?: string;
 };
 
@@ -93,10 +91,6 @@ export async function fetchExitPendingSignals(): Promise<FlowExitSignal[]> {
 }
 
 export async function handleFlowExitSignal(signal: FlowExitSignal): Promise<FlowExitResult> {
-  if (config.DRY_RUN) {
-    return journalDryRunExit(signal);
-  }
-
   const settings = await getLiveSettings();
   if (!settings.sellExecutionEnabled) {
     const row = await upsertExitRow(signal, {
@@ -118,7 +112,6 @@ export async function handleFlowExitSignal(signal: FlowExitSignal): Promise<Flow
       status: "failed",
       position_id: signal.position_id,
       journal_id: row.id,
-      dry_run: false,
       error: "sell_execution_disabled",
     };
   }
@@ -150,7 +143,6 @@ export async function handleFlowExitSignal(signal: FlowExitSignal): Promise<Flow
       status: "failed",
       position_id: signal.position_id,
       journal_id: row.id,
-      dry_run: false,
       error: "zero_token_balance",
     };
   }
@@ -194,7 +186,6 @@ export async function handleFlowExitSignal(signal: FlowExitSignal): Promise<Flow
       position_id: signal.position_id,
       journal_id: claim.row.id,
       signature: result.response.signature,
-      dry_run: false,
       error,
     };
   }
@@ -353,52 +344,6 @@ async function executeTokenSellWithRuntimeRetries(input: {
   return finalResult;
 }
 
-async function journalDryRunExit(signal: FlowExitSignal): Promise<FlowExitResult> {
-  const existing = await db.flowExitExecution.findUnique({
-    where: { positionId: signal.position_id },
-  });
-
-  if (existing?.state === "closed") {
-    return terminalResult(signal, existing, "already_processed");
-  }
-  if (existing?.state === "processing") {
-    return terminalResult(signal, existing, "already_processing");
-  }
-  if (existing?.state === "sell_confirmed_close_pending") {
-    return terminalResult(signal, existing, "close_pending");
-  }
-  if (existing?.state === "dry_run_journaled") {
-    return terminalResult(signal, existing, "already_processed");
-  }
-
-  exitsAttempted.labels("true").inc();
-  exitsConfirmed.labels("true").inc();
-
-  const row = await upsertExitRow(signal, {
-    state: "dry_run_journaled",
-    dryRun: true,
-    tokenAmountRaw: signal.token_amount_raw ?? null,
-    closeReason: signal.trigger_reason,
-    errorReason: null,
-    errorMessage: null,
-    completedAt: new Date(),
-  });
-  logger.info(
-    {
-      position_id: signal.position_id,
-      token_mint: signal.token_mint,
-      token_amount_raw: signal.token_amount_raw ?? null,
-    },
-    "flow exit dry-run sell journaled",
-  );
-  return {
-    status: "dry_run_journaled",
-    position_id: signal.position_id,
-    journal_id: row.id,
-    dry_run: true,
-  };
-}
-
 async function claimExitForLiveSell(signal: FlowExitSignal): Promise<
   | { kind: "claimed"; row: Awaited<ReturnType<typeof upsertExitRow>> }
   | { kind: "blocked"; result: FlowExitResult }
@@ -433,7 +378,7 @@ async function claimExitForLiveSell(signal: FlowExitSignal): Promise<
     return { kind: "blocked", result: await retryCloseOnly(signal, existing) };
   }
 
-  const claimableStates = ["dry_run_journaled", "sell_failed", "failed"];
+  const claimableStates = ["sell_failed", "failed"];
   if (!claimableStates.includes(existing.state)) {
     return { kind: "blocked", result: terminalResult(signal, existing, "already_processing") };
   }
@@ -504,7 +449,6 @@ async function retryCloseOnly(
     position_id: signal.position_id,
     journal_id: closed.id,
     signature: closed.signature ?? undefined,
-    dry_run: false,
     error: closeResult.ok ? undefined : "position_close_failed",
   };
 }
@@ -617,7 +561,6 @@ function terminalResult(
     position_id: signal.position_id,
     journal_id: row.id,
     signature: row.signature ?? undefined,
-    dry_run: row.dryRun,
   };
 }
 
