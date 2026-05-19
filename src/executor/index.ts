@@ -275,6 +275,7 @@ export async function executeTokenSell(input: {
     submitted_via?: SubmissionPath;
     sol_received?: number;
     dry_run?: boolean;
+    error_kind?: string;
   };
 }> {
   return executeTokenSellWithDependencies(input, await defaultDependencies());
@@ -299,6 +300,7 @@ export async function executeTokenSellWithDependencies(
     submitted_via?: SubmissionPath;
     sol_received?: number;
     dry_run?: boolean;
+    error_kind?: string;
   };
 }> {
   assertExecutorPathNotReachableFromFlowDryRun("executor_trading");
@@ -398,8 +400,9 @@ export async function executeTokenSellWithDependencies(
   } catch (error) {
     const outcome: Extract<ExecutionOutcome, "pre_submit_failed" | "uncertain"> =
       signature && submissionAttempted ? "uncertain" : "pre_submit_failed";
+    const errorKind = error instanceof JupiterApiError ? error.kind : undefined;
     logger.error(
-      { err: error, exit_id: input.exitId, signature: signature?.toString() },
+      { err: error, exit_id: input.exitId, signature: signature?.toString(), error_kind: errorKind },
       submissionAttempted
         ? "exit sell failed after submission"
         : "exit sell failed before submission",
@@ -410,6 +413,7 @@ export async function executeTokenSellWithDependencies(
       response: {
         error: outcome,
         exit_id: input.exitId,
+        ...(errorKind !== undefined ? { error_kind: errorKind } : {}),
         ...(submissionAttempted && signature ? { signature: signature.toString() } : {}),
       },
     };

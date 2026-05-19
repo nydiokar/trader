@@ -6,7 +6,7 @@ import { fetchExitPendingSignals, handleFlowExitSignal, recoverClosePending } fr
 // POST /flow/exit the moment trail70 fires. This poller runs at a slow cadence
 // and catches any positions that were missed (trader restart, network blip, etc.).
 // Positions already handled by the push are skipped via already_processed guard.
-const SAFETY_NET_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+const DEFAULT_SAFETY_NET_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 
 export class FlowExitPoller {
   private timer: NodeJS.Timeout | null = null;
@@ -16,15 +16,16 @@ export class FlowExitPoller {
 
   start(): void {
     if (this.timer || this.stopped) return;
+    const intervalMs = config.FLOW_EXIT_POLL_INTERVAL_MS ?? DEFAULT_SAFETY_NET_INTERVAL_MS;
     logger.info(
       {
-        interval_ms: SAFETY_NET_INTERVAL_MS,
+        interval_ms: intervalMs,
         dry_run: config.DRY_RUN,
         mode: "safety_net",
       },
       "flow exit poller started (safety-net mode)",
     );
-    this.timer = setInterval(() => void this.tick(), SAFETY_NET_INTERVAL_MS);
+    this.timer = setInterval(() => void this.tick(), intervalMs);
   }
 
   stop(): void {

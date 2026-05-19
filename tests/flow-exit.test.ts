@@ -29,7 +29,7 @@ function sign(secret: string, timestamp: number, body: string): string {
 
 function makeExitSignal(overrides: Record<string, unknown> = {}) {
   return {
-    schema_version: "flow_exit_signal_v1",
+    schema_version: "flow_exit_signal_v1" as const,
     position_id: positionId,
     token_mint: tokenMint,
     policy_label: "p1_liq20_trail70",
@@ -99,7 +99,14 @@ async function postExit(app: Awaited<ReturnType<typeof makeApp>>["app"], payload
   });
 }
 
-async function makeExitModule(dbPath: string, opts: { keepTokensIngestUrl?: boolean } = {}) {
+async function makeExitModule(
+  dbPath: string,
+  opts: {
+    keepTokensIngestUrl?: boolean;
+    dryRun?: boolean;
+    executeTokenSellMock?: ReturnType<typeof vi.fn>;
+  } = {},
+) {
   // Always clear poll-related env before importing config so validation passes
   process.env["FLOW_EXIT_POLL_ENABLED"] = "false";
   if (!opts.keepTokensIngestUrl) {
@@ -113,7 +120,13 @@ async function makeExitModule(dbPath: string, opts: { keepTokensIngestUrl?: bool
   process.env["WEBHOOK_SECRET"] = "a".repeat(32);
   process.env["FLOW_DRY_RUN_WEBHOOK_SECRET"] = flowSecret;
   process.env["LOG_LEVEL"] = "fatal";
-  process.env["DRY_RUN"] = "true";
+  process.env["DRY_RUN"] = opts.dryRun === false ? "false" : "true";
+
+  if (opts.executeTokenSellMock) {
+    vi.doMock("../src/executor/index.js", () => ({
+      executeTokenSell: opts.executeTokenSellMock,
+    }));
+  }
 
   const { connectDb, disconnectDb } = await import("../src/db/index.js");
   const { handleFlowExitSignal, recoverClosePending } = await import("../src/flow/exit.js");
@@ -323,6 +336,122 @@ describe("close_pending recovery", () => {
       expect(result).toEqual({ recovered: 0, stillPending: 0, alerted: 0 });
     } finally {
       await ctx.cleanup();
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("live flow exit sell retries", () => {
+  it("retries pre-submit exit sells with stepped slippage before failing", async () => {
+    process.env["TOKENS_INGEST_BASE_URL"] = "https://tokens.example.com";
+    process.env["FLOW_EXIT_POLL_ENABLED"] = "false";
+    vi.resetModules();
+    const { dbPath, tempDir } = makeTempDb();
+
+    const executeTokenSellMock = vi.fn().mockResolvedValue({
+      state: "failed",
+      decision: "pre_submit_failed",
+      response: { error: "pre_submit_failed", exit_id: "exit-1", error_kind: "invalid_quote" },
+    });
+
+    const ctx = await makeExitModule(dbPath, {
+      keepTokensIngestUrl: true,
+      dryRun: false,
+      executeTokenSellMock,
+    });
+    try {
+      await ctx.db.$executeRawUnsafe(
+        "CREATE TABLE IF NOT EXISTS runtime_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL)",
+      );
+      await ctx.db.$executeRawUnsafe(
+        "INSERT INTO runtime_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        "sell_execution_enabled",
+        "true",
+        1,
+      );
+      await ctx.db.$executeRawUnsafe(
+        "INSERT INTO runtime_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        "retry_delay_ms",
+        "0",
+        1,
+      );
+
+      const result = await ctx.handleFlowExitSignal(makeExitSignal());
+
+      expect(result).toEqual(
+        expect.objectContaining({
+          status: "failed",
+          position_id: positionId,
+          error: "pre_submit_failed",
+        }),
+      );
+      expect(executeTokenSellMock).toHaveBeenCalledTimes(3);
+      expect(executeTokenSellMock.mock.calls.map(([input]) => input.maxSlippageBps)).toEqual([
+        600,
+        1000,
+        1400,
+      ]);
+    } finally {
+      await ctx.cleanup();
+      vi.doUnmock("../src/executor/index.js");
+      delete process.env["TOKENS_INGEST_BASE_URL"];
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("stops retrying when a stepped exit sell confirms", async () => {
+    process.env["TOKENS_INGEST_BASE_URL"] = "https://tokens.example.com";
+    process.env["FLOW_EXIT_POLL_ENABLED"] = "false";
+    vi.resetModules();
+    const { dbPath, tempDir } = makeTempDb();
+
+    const executeTokenSellMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        state: "failed",
+        decision: "pre_submit_failed",
+        response: { error: "pre_submit_failed", exit_id: "exit-1", error_kind: "invalid_quote" },
+      })
+      .mockResolvedValueOnce({
+        state: "done",
+        decision: "accepted",
+        response: { status: "confirmed", exit_id: "exit-1", signature: "sig123", sol_received: 0.009 },
+      });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, status: 200, text: async () => "ok" }));
+
+    const ctx = await makeExitModule(dbPath, {
+      keepTokensIngestUrl: true,
+      dryRun: false,
+      executeTokenSellMock,
+    });
+    try {
+      await ctx.db.$executeRawUnsafe(
+        "CREATE TABLE IF NOT EXISTS runtime_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL)",
+      );
+      await ctx.db.$executeRawUnsafe(
+        "INSERT INTO runtime_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        "sell_execution_enabled",
+        "true",
+        1,
+      );
+      await ctx.db.$executeRawUnsafe(
+        "INSERT INTO runtime_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        "retry_delay_ms",
+        "0",
+        1,
+      );
+
+      const result = await ctx.handleFlowExitSignal(makeExitSignal());
+
+      expect(result.status).toBe("closed");
+      expect(result.signature).toBe("sig123");
+      expect(executeTokenSellMock).toHaveBeenCalledTimes(2);
+      expect(executeTokenSellMock.mock.calls.map(([input]) => input.maxSlippageBps)).toEqual([600, 1000]);
+    } finally {
+      await ctx.cleanup();
+      vi.unstubAllGlobals();
+      vi.doUnmock("../src/executor/index.js");
+      delete process.env["TOKENS_INGEST_BASE_URL"];
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
   });

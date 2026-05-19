@@ -48,6 +48,7 @@ describe("telegram notifications", () => {
       formatExitTriggered,
       formatExitConfirmed,
       formatExitFailed,
+      formatExitRetrying,
     } = await import("../src/notify/telegram.js");
 
     const confirmed = formatTradeConfirmed({
@@ -99,10 +100,35 @@ describe("telegram notifications", () => {
     expect(tripwire).toContain("TRIPWIRES");
     expect(tripwire).toContain("rug_risk");
 
-    const exitTriggered = formatExitTriggered({ tokenMint: "mintXYZ", positionId: "pos-1", triggerReason: "take_profit", sizeSol: 0.5 });
-    expect(exitTriggered).toContain("EXIT TRIGGERED");
+    const exitTriggered = formatExitTriggered({
+      tokenMint: "mintXYZ",
+      positionId: "pos-1",
+      triggerReason: "take_profit",
+      sizeSol: 0.5,
+      priceAtTriggerUsd: 0.000009,
+      attempt: 2,
+      totalAttempts: 3,
+      slippageBps: 1000,
+    });
+    expect(exitTriggered).toContain("EXIT SELL ATTEMPT");
     expect(exitTriggered).toContain("take_profit");
     expect(exitTriggered).toContain("0.5 SOL");
+    expect(exitTriggered).toContain("Attempt: 2/3");
+    expect(exitTriggered).toContain("10.00%");
+    expect(exitTriggered).toContain("$0.00000900");
+
+    const retrying = formatExitRetrying({
+      tokenMint: "mintXYZ",
+      positionId: "pos-1",
+      error: "pre_submit_failed",
+      nextAttempt: 3,
+      totalAttempts: 3,
+      nextSlippageBps: 1400,
+      delayMs: 300,
+    });
+    expect(retrying).toContain("EXIT RETRYING");
+    expect(retrying).toContain("3/3");
+    expect(retrying).toContain("14.00%");
 
     const exitConfirmed = formatExitConfirmed({ tokenMint: "mintXYZ", positionId: "pos-1", signature: "sig123", triggerReason: "take_profit" });
     expect(exitConfirmed).toContain("EXIT CONFIRMED");

@@ -9,6 +9,7 @@ import {
   formatExitTriggered,
   formatExitConfirmed,
   formatExitFailed,
+  formatExitRetrying,
 } from "../notify/telegram.js";
 import { getTradingSigner } from "../solana/runtime.js";
 import {
@@ -154,24 +155,18 @@ export async function handleFlowExitSignal(signal: FlowExitSignal): Promise<Flow
     };
   }
 
-  // notify only when we actually attempt to execute the sell
-  notify(
-    formatExitTriggered({
-      tokenMint: signal.token_mint,
-      positionId: signal.position_id,
-      triggerReason: signal.trigger_reason,
-      sizeSol: signal.size_sol,
-      priceAtTriggerUsd: signal.price_at_trigger_usd,
-    }),
-  ).catch((err) => logger.warn({ err }, "telegram exit-triggered notification failed"));
-
   exitsAttempted.labels("false").inc();
   const sellStart = Date.now();
-  const result = await executeTokenSell({
+  const result = await executeTokenSellWithRuntimeRetries({
     exitId: claim.row.id,
     tokenMint: signal.token_mint,
     tokenAmountRaw,
-    maxSlippageBps: settings.maxSlippageBps,
+    baseSlippageBps: settings.maxSlippageBps,
+    retryAttempts: settings.sellRetryAttempts,
+    retrySlippageStepBps: settings.retrySlippageStepBps,
+    maxRetrySlippageBps: settings.maxRetrySlippageBps,
+    retryDelayMs: settings.retryDelayMs,
+    signal,
   });
   exitSellToConfirmSeconds.observe((Date.now() - sellStart) / 1000);
 
@@ -257,6 +252,105 @@ export async function handleFlowExitSignal(signal: FlowExitSignal): Promise<Flow
   });
 
   return retryCloseOnly(signal, pendingClose);
+}
+
+async function executeTokenSellWithRuntimeRetries(input: {
+  exitId: string;
+  tokenMint: string;
+  tokenAmountRaw: string;
+  baseSlippageBps: number;
+  retryAttempts: number;
+  retrySlippageStepBps: number;
+  maxRetrySlippageBps: number;
+  retryDelayMs: number;
+  signal: FlowExitSignal;
+}): ReturnType<typeof executeTokenSell> {
+  const totalAttempts = Math.max(1, input.retryAttempts);
+  let finalResult: Awaited<ReturnType<typeof executeTokenSell>> | null = null;
+  let slippageStepIndex = 0;
+  let prevErrorKind: string | undefined;
+
+  for (let index = 0; index < totalAttempts; index += 1) {
+    const attempt = index + 1;
+    const slippageBps = Math.min(
+      input.baseSlippageBps + slippageStepIndex * input.retrySlippageStepBps,
+      input.maxRetrySlippageBps,
+    );
+
+    notify(
+      formatExitTriggered({
+        tokenMint: input.signal.token_mint,
+        positionId: input.signal.position_id,
+        triggerReason: input.signal.trigger_reason,
+        sizeSol: input.signal.size_sol,
+        priceAtTriggerUsd: input.signal.price_at_trigger_usd,
+        attempt,
+        totalAttempts,
+        slippageBps,
+      }),
+    ).catch((err) => logger.warn({ err }, "telegram exit-attempt notification failed"));
+
+    if (attempt > 1) {
+      logger.info(
+        {
+          position_id: input.signal.position_id,
+          token_mint: input.tokenMint,
+          attempt,
+          slippage_bps: slippageBps,
+          prev_error_kind: prevErrorKind,
+        },
+        "retrying exit sell execution",
+      );
+    }
+
+    const result = await executeTokenSell({
+      exitId: input.exitId,
+      tokenMint: input.tokenMint,
+      tokenAmountRaw: input.tokenAmountRaw,
+      maxSlippageBps: slippageBps,
+    });
+    finalResult = result;
+
+    const errorKind = result.response.error_kind;
+    prevErrorKind = errorKind;
+    const retryablePreSubmit =
+      result.state === "failed" &&
+      result.decision === "pre_submit_failed" &&
+      !result.response.signature &&
+      errorKind !== "no_route";
+
+    if (!retryablePreSubmit) {
+      break;
+    }
+
+    if (errorKind === "invalid_quote") {
+      slippageStepIndex += 1;
+    }
+
+    if (index < totalAttempts - 1 && input.retryDelayMs > 0) {
+      const nextSlippageBps = Math.min(
+        input.baseSlippageBps + slippageStepIndex * input.retrySlippageStepBps,
+        input.maxRetrySlippageBps,
+      );
+      notify(
+        formatExitRetrying({
+          tokenMint: input.signal.token_mint,
+          positionId: input.signal.position_id,
+          error: result.decision,
+          nextAttempt: attempt + 1,
+          totalAttempts,
+          nextSlippageBps,
+          delayMs: input.retryDelayMs,
+        }),
+      ).catch((err) => logger.warn({ err }, "telegram exit-retrying notification failed"));
+      await new Promise<void>((resolve) => setTimeout(resolve, input.retryDelayMs));
+    }
+  }
+
+  if (!finalResult) {
+    throw new Error("exit sell execution did not run");
+  }
+  return finalResult;
 }
 
 async function journalDryRunExit(signal: FlowExitSignal): Promise<FlowExitResult> {

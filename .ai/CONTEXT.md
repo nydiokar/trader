@@ -34,6 +34,7 @@ Canonical spec: `solana-signal-bot-spec-v2.md`
 | M5 | Jito integration | 2 days | **Implemented, live blocked** | >= 95% landing rate, p95 <= 10s, fallback path tested, UNCERTAIN state proven safe |
 | M6 | Risk layer | 1 day | **Partially implemented** | Every blocker has a test; kill switch verified in prod |
 | M7 | Observability | 0.5 day | **Implemented** | All lifecycle Telegram events wired; |
+| M-TX | Executor TX Overhaul | 2 days | **Planned — blocking** | No `pre_submit_failed` from tx size; `/swap`-based build; canary confirms on previously-failing pump token |
 | M8 | Canary period | 1 week calendar | **Not started** | 5-7 days live with tiny caps, no UNCERTAIN states, >= 95% landing |
 | M9 | Production size-up | Ongoing | **Not started** | One full week at target size with SLOs met |
 
@@ -87,6 +88,24 @@ Hard constraints:
 - Do not call Jupiter, sign transactions, or submit transactions in the Flow dry-run bridge.
 - Persist every bridge attempt, including rejects and duplicates, in DB.
 - Keep execution/capital risk checks in the bot, separate from Flow alpha/gating logic.
+
+---
+
+### Planned: Executor TX Overhaul — BLOCKING LIVE TRADING
+
+Spec: `.ai/milestones/M-executor-tx-overhaul.md`
+
+Current `/swap-instructions` + manual tx assembly blows Solana's 1232-byte limit on real pump tokens (observed: 1680 bytes on `Gm38SBgNht9f23AyXibPAqv41UkxVsXCo6PfbJEkpump`, 2026-05-19). Jupiter's `/swap` endpoint returns 1168 bytes for the same token. Full audit identified 8 issues — see milestone spec.
+
+- [ ] Switch `/swap-instructions` → `/swap`; pass `computeUnitPriceMicroLamports` directly to the request
+- [ ] Remove `buildSwapTransaction` / `createSwapTransactionMessage` / ALT-fetch from `index.ts`; add `deserializeAndSign` helper
+- [ ] Move Helius Sender tip to a separate transaction (same as Jito tip tx pattern)
+- [ ] Add early size check after deserialize: fail fast with `error_kind=tx_too_large` if > 1200 bytes
+- [ ] Switch simulate call to `replaceRecentBlockhash: true`
+- [ ] Add rebroadcast loop in RPC fallback path (resubmit every 2s until confirmed/expired)
+- [ ] Rotate Jito tip account randomly per bundle instead of caching
+- [ ] Update invariant I6 and Known Decisions table (see below)
+- [ ] All tests pass; `pnpm canary:buy` confirms on the previously-failing token
 
 ---
 
@@ -241,7 +260,7 @@ M4 task scaffold: `.ai/milestones/M4.md`
 - **I3.** The processor/executor must be entered at most once per `signal_id`.
 - **I4.** Terminal outcomes must write back to DB.
 - **I5.** Private key material must stay redacted in logs.
-- **I6.** Jupiter `/swap` is forbidden; only `/swap-instructions` is allowed.
+- **I6.** ~~Jupiter `/swap` is forbidden; only `/swap-instructions` is allowed.~~ **REVERSED (2026-05-19):** Use `/swap` with explicit `computeUnitPriceMicroLamports`. `/swap-instructions` + manual assembly produces transactions that exceed the 1232-byte limit on real routes. See `M-executor-tx-overhaul.md`. <--- reconsider! 
 - **I7.** After Jito acceptance, RPC fallback is forbidden.
 - **I8.** UNCERTAIN tx state is a human-intervention path, not an auto-retry path.
 
@@ -252,7 +271,7 @@ M4 task scaffold: `.ai/milestones/M4.md`
 | Decision | Reason |
 |:---------|:-------|
 | SQLite over Postgres | Single-process and low-ops at v1 scale |
-| `/swap-instructions` over `/swap` | Required for fee, CU, and Jito control |
+| ~~`/swap-instructions` over `/swap`~~ → `/swap` over `/swap-instructions` | Original reason (fee/CU/Jito control) is preserved by passing `computeUnitPriceMicroLamports` to `/swap`. Reversed 2026-05-19 after tx-too-large failures in production. See `M-executor-tx-overhaul.md`. |
 | Jito-first submission | MEV protection and faster landing |
 | Tripwires advisory by default | Upstream signal source is trusted |
 | Honeypot simulation deferred to v2 | Too error-prone for current scope |

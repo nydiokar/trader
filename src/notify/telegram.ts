@@ -131,17 +131,44 @@ export function formatExitTriggered(input: {
   triggerReason: string;
   sizeSol?: number;
   priceAtTriggerUsd?: number;
+  attempt?: number;
+  totalAttempts?: number;
+  slippageBps?: number;
 }): string {
   const lines = [
-    `📤 <b>EXIT TRIGGERED</b>`,
+    `📤 <b>EXIT SELL ATTEMPT</b>`,
     `Token: <code>${input.tokenMint}</code>`,
     `Reason: ${input.triggerReason}`,
   ];
+  if (input.attempt != null && input.totalAttempts != null) {
+    lines.push(`Attempt: ${input.attempt}/${input.totalAttempts}`);
+  }
+  if (input.slippageBps != null) lines.push(`Slippage limit: ${(input.slippageBps / 100).toFixed(2)}%`);
   if (input.sizeSol != null) lines.push(`Size: ${input.sizeSol} SOL`);
   if (input.priceAtTriggerUsd != null)
-    lines.push(`Price: $${input.priceAtTriggerUsd.toFixed(4)}`);
+    lines.push(`Price: ${formatUsdPrice(input.priceAtTriggerUsd)}`);
   lines.push(`Position: <code>${input.positionId}</code>`);
   return lines.join("\n");
+}
+
+export function formatExitRetrying(input: {
+  tokenMint: string;
+  positionId: string;
+  error: string;
+  nextAttempt: number;
+  totalAttempts: number;
+  nextSlippageBps: number;
+  delayMs: number;
+}): string {
+  return [
+    `↻ <b>EXIT RETRYING</b>`,
+    `Token: <code>${input.tokenMint}</code>`,
+    `Error: ${input.error}`,
+    `Next attempt: ${input.nextAttempt}/${input.totalAttempts}`,
+    `Next slippage limit: ${(input.nextSlippageBps / 100).toFixed(2)}%`,
+    `Delay: ${input.delayMs}ms`,
+    `Position: <code>${input.positionId}</code>`,
+  ].join("\n");
 }
 
 export function formatExitConfirmed(input: {
@@ -187,6 +214,12 @@ export function formatExitFailed(input: {
   if (input.signature) lines.push(`Tx: https://solscan.io/tx/${input.signature}`);
   lines.push(`Position: <code>${input.positionId}</code>`);
   return lines.join("\n");
+}
+
+function formatUsdPrice(value: number): string {
+  if (Math.abs(value) >= 0.01) return `$${value.toFixed(4)}`;
+  if (Math.abs(value) >= 0.000001) return `$${value.toFixed(8)}`;
+  return `$${value.toExponential(4)}`;
 }
 
 // ── System alerts ───────────────────────────────────────────────────────────
