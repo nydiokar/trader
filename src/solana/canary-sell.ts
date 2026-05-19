@@ -12,8 +12,6 @@ type Args = {
   retryAttempts?: number;
   retrySlippageStepBps?: number;
   maxRetrySlippageBps?: number;
-  walletFloorSol?: number;
-  feeBufferSol?: number;
   mode?: SubmissionMode;
   quoteOnly: boolean;
   live: boolean;
@@ -41,8 +39,6 @@ function usage(): string {
     "  --retry-attempts 2",
     "  --retry-slippage-step-bps 300",
     "  --max-retry-slippage-bps 1500",
-    "  --wallet-floor-sol 0.15",
-    "  --fee-buffer-sol 0.006",
     "",
     "Safety:",
     "  Without --live this builds a dry-run signed transaction and does not submit.",
@@ -102,12 +98,6 @@ function parseArgs(argv: string[]): Args {
       case "--max-retry-slippage-bps":
         args.maxRetrySlippageBps = parsePositiveInteger(name, value());
         break;
-      case "--wallet-floor-sol":
-        args.walletFloorSol = parseNonNegativeNumber(name, value());
-        break;
-      case "--fee-buffer-sol":
-        args.feeBufferSol = parsePositiveNumber(name, value());
-        break;
       case "--mode":
         args.mode = parseSubmissionMode(value());
         break;
@@ -147,18 +137,6 @@ function parsePercent(raw: string): number {
   if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 100) {
     fail("--percent must be > 0 and <= 100");
   }
-  return parsed;
-}
-
-function parsePositiveNumber(name: string, raw: string): number {
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed <= 0) fail(`${name} must be a positive number`);
-  return parsed;
-}
-
-function parseNonNegativeNumber(name: string, raw: string): number {
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed < 0) fail(`${name} must be a non-negative number`);
   return parsed;
 }
 
@@ -241,8 +219,6 @@ async function main(): Promise<void> {
   args.retryAttempts ??= settings.sellRetryAttempts;
   args.retrySlippageStepBps ??= settings.retrySlippageStepBps;
   args.maxRetrySlippageBps ??= settings.maxRetrySlippageBps;
-  args.walletFloorSol ??= settings.walletFloorSol;
-  args.feeBufferSol ??= settings.feeBufferSol;
 
   const mint = args.mint ?? fail("--mint is required");
   const maxSlippageBps = args.maxSlippageBps ?? fail("missing maxSlippageBps");
@@ -250,8 +226,6 @@ async function main(): Promise<void> {
   const retrySlippageStepBps = args.retrySlippageStepBps ?? fail("missing retrySlippageStepBps");
   const configuredMaxRetrySlippageBps = args.maxRetrySlippageBps ?? fail("missing maxRetrySlippageBps");
   const maxRetrySlippageBps = Math.max(configuredMaxRetrySlippageBps, maxSlippageBps);
-  const walletFloorSol = args.walletFloorSol ?? fail("missing walletFloorSol");
-  const feeBufferSol = args.feeBufferSol ?? fail("missing feeBufferSol");
 
   if (args.live && !args.quoteOnly && args.confirm !== LIVE_CONFIRMATION) {
     fail(`live canary sell requires --confirm ${LIVE_CONFIRMATION}`);
@@ -295,11 +269,6 @@ async function main(): Promise<void> {
     .getBalance(signer.address, { commitment: "confirmed" })
     .send();
   const walletSolBefore = Number(walletBalanceBefore.value) / 1_000_000_000;
-  if (walletSolBefore - feeBufferSol < walletFloorSol) {
-    fail(
-      `wallet SOL balance would cross floor: before=${walletSolBefore}, estimatedFeeBuffer=${feeBufferSol}, floor=${walletFloorSol}`,
-    );
-  }
 
   const tokenBalanceBefore = await getWalletTokenBalance(mint);
   const tokenAmountRaw = args.amountRaw ?? amountFromPercent(tokenBalanceBefore.rawAmount, args.percent ?? 0);
@@ -403,8 +372,6 @@ async function main(): Promise<void> {
           retryAttempts,
           retrySlippageStepBps,
           maxRetrySlippageBps,
-          walletFloorSol,
-          feeBufferSol,
         },
         walletSolBefore,
         walletSolAfter,
