@@ -10,7 +10,7 @@ export const WSOL_MINT = "So11111111111111111111111111111111111111112";
 
 export class JupiterApiError extends Error {
   constructor(
-    readonly kind: "invalid_quote" | "no_route" | "rate_limited" | "timeout" | "upstream",
+    readonly kind: "invalid_quote" | "no_route" | "rate_limited" | "timeout" | "upstream" | "tx_too_large",
     message: string,
     readonly statusCode?: number,
   ) {

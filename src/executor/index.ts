@@ -75,7 +75,7 @@ type PriorityFeeClient = {
   getPriorityFeeEstimate(serializedTransaction?: string): Promise<bigint>;
 };
 
-const TX_SIZE_LIMIT_BYTES = 1200;
+const TX_SIZE_LIMIT_BYTES = 1232;
 
 type ChainClient = {
   getLatestBlockhash(
@@ -779,12 +779,6 @@ export async function deserializeAndSign(
 }> {
   const rawBytes = new Uint8Array(Buffer.from(base64Tx, "base64"));
 
-  if (rawBytes.length > TX_SIZE_LIMIT_BYTES) {
-    throw new Error(
-      `tx_too_large: Jupiter returned ${rawBytes.length} bytes (limit ${TX_SIZE_LIMIT_BYTES})`,
-    );
-  }
-
   const decodedTx = getTransactionDecoder().decode(rawBytes);
   const compiledMessage = getCompiledTransactionMessageDecoder().decode(decodedTx.messageBytes);
   const hasAlts = ((compiledMessage as unknown as { addressTableLookups?: unknown[] }).addressTableLookups?.length ?? 0) > 0;
@@ -822,6 +816,13 @@ export async function deserializeAndSign(
   const transaction = await signTransactionMessageWithSigners(updatedMessage);
 
   const signedBase64 = getBase64EncodedWireTransaction(transaction);
+  const signedBytes = Buffer.from(signedBase64, "base64");
+  if (signedBytes.length > TX_SIZE_LIMIT_BYTES) {
+    throw new JupiterApiError(
+      "tx_too_large",
+      `tx_too_large: signed transaction is ${signedBytes.length} bytes (limit ${TX_SIZE_LIMIT_BYTES})`,
+    );
+  }
 
   // Simulate with replaceRecentBlockhash so stale blockhashes don't cause false failures.
   const simulation = await connection.simulateTransaction(signedBase64);

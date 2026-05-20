@@ -624,12 +624,13 @@ async function executeSignalWithRuntimeRetries(
     const errorKind = typeof response["error_kind"] === "string" ? response["error_kind"] : undefined;
     prevErrorKind = errorKind;
 
-    // no_route is permanent — Jupiter has no route for this token, retrying is pointless
+    // no_route and tx_too_large are permanent — retrying with same params won't help
     const retryablePreSubmit =
       result.state === "failed" &&
       result.decision === "pre_submit_failed" &&
       typeof response["signature"] !== "string" &&
-      errorKind !== "no_route";
+      errorKind !== "no_route" &&
+      errorKind !== "tx_too_large";
 
     // only step up slippage when the failure was specifically a price impact rejection
     if (retryablePreSubmit && errorKind === "invalid_quote") {
