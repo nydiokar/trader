@@ -88,7 +88,8 @@ export async function sendTransactionViaHeliusSender(
   }
 
   if (!response.ok) {
-    throw new HeliusSenderSyncError(`Helius Sender HTTP ${response.status}`);
+    const body = await response.text().catch(() => "");
+    throw new HeliusSenderSyncError(`Helius Sender HTTP ${response.status}: ${body}`);
   }
 
   let payload: { result?: string; error?: { message?: string } };

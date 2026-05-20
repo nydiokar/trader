@@ -259,9 +259,10 @@ M4 task scaffold: `.ai/milestones/M4.md`
 - **I3.** The processor/executor must be entered at most once per `signal_id`.
 - **I4.** Terminal outcomes must write back to DB.
 - **I5.** Private key material must stay redacted in logs.
-- **I6.** ~~Jupiter `/swap` is forbidden; only `/swap-instructions` is allowed.~~ **REVERSED (2026-05-19):** Use `/swap` with explicit `computeUnitPriceMicroLamports`. `/swap-instructions` + manual assembly produces transactions that exceed the 1232-byte limit on real routes. See `M-executor-tx-overhaul.md`. <--- reconsider! 
+- **I6.** Use Jupiter `/swap` with explicit `computeUnitPriceMicroLamports`. `/swap-instructions` + manual assembly produces transactions that exceed the 1232-byte limit on real routes. Reversed 2026-05-19. See `M-executor-tx-overhaul.md`.
 - **I7.** After Jito acceptance, RPC fallback is forbidden.
 - **I8.** UNCERTAIN tx state is a human-intervention path, not an auto-retry path.
+- **I9.** Helius Sender tip is NOT a separate transaction. Jupiter `/swap` returns a pre-built tx we cannot inject instructions into. Tip instruction cannot be baked in. We use `?swqos_only=true` (SWQoS staked routing, no Jito auction) and rely on `computeUnitPriceMicroLamports` for on-chain priority. Trade-off: no Jito MEV auction inclusion via Helius Sender. Escalation path if landing degrades: switch to `/swap-instructions` + baked tip + Jito bundle. See submission ladder below.
 
 ---
 
@@ -270,14 +271,50 @@ M4 task scaffold: `.ai/milestones/M4.md`
 | Decision | Reason |
 |:---------|:-------|
 | SQLite over Postgres | Single-process and low-ops at v1 scale |
-| ~~`/swap-instructions` over `/swap`~~ → `/swap` over `/swap-instructions` | Original reason (fee/CU/Jito control) is preserved by passing `computeUnitPriceMicroLamports` to `/swap`. Reversed 2026-05-19 after tx-too-large failures in production. See `M-executor-tx-overhaul.md`. |
-| Jito-first submission | MEV protection and faster landing |
+| `/swap` over `/swap-instructions` | tx-too-large failures on real pump tokens (1680 bytes). `/swap` returns size-compliant pre-built tx. CU price passed as param. Reversed 2026-05-19. |
+| Helius Sender `?swqos_only=true`, no tip tx | Jupiter `/swap` pre-builds the tx; we cannot inject a tip instruction. Separate tip tx rejected by Helius Sender (HTTP 500). SWQoS gives staked routing priority; Jito auction requires baked tip inside tx — not available on this path. Degradation risk: under high contention, no Jito auction = lower inclusion priority vs bots using full Jito bundles. Escalation: `/swap-instructions` + baked tip + Jito bundle (see submission ladder). |
+| Jito-first submission (historical, now secondary) | MEV protection and faster landing — still valid for escalation path |
 | Tripwires advisory by default | Upstream signal source is trusted |
 | Honeypot simulation deferred to v2 | Too error-prone for current scope |
 | Local-first hosting | No platform lock-in before canary |
 | M1 ingress gate uses direct `better-sqlite3` statements | Needed to guarantee a literal `BEGIN IMMEDIATE` critical section for replay/race safety |
 | `@solana/kit` over direct legacy `@solana/web3.js` | Current Solana SDK direction |
 | M3 no longer requires Jupiter devnet liquidity | Jupiter routing is mainnet-centered; devnet validates wallet/RPC/sign/submit/confirm only |
+
+---
+
+## Submission Architecture & Escalation Ladder
+
+Current implementation is deliberately simple. When landing rate degrades or requirements change, escalate in order:
+
+**Quote source** (swap independently of send path):
+- Jupiter `/quote` + `/swap` — current, handles ALTs, size-compliant
+- Jupiter `/quote` + `/swap-instructions` — instruction-level control, needed for tip injection, higher tx size risk
+- Direct DEX SDKs — Raydium, Orca, Meteora, PumpSwap, PumpFun AMM — needed for ungraduated tokens Jupiter rejects
+
+**Transaction construction** (determines what can be baked in):
+- Pre-built (`/swap`) — current; CU price injected via param; no tip instruction possible
+- Instruction-level (`/swap-instructions`) — full control; bake tip + CU limit + CU price; tx size risk returns
+- Fully manual — direct DEX SDK, custom route; maximum control, maximum complexity
+
+**Send path** (ordered by implementation cost and landing probability under contention):
+1. **Primary (current):** Jupiter `/swap` + `computeUnitPriceMicroLamports` → Helius Sender `?swqos_only=true` (staked SWQoS routing, no Jito auction)
+2. **Fallback (current):** rebroadcast same signed tx via standard RPC every 2s until block height expires
+3. **Escalation:** `/swap-instructions` + baked Jito tip instruction → Jito bundle (full MEV auction; solves landing under contention; re-introduces tx size risk)
+4. **Race mode:** fire primary + escalation simultaneously, take whichever confirms first
+5. **Multi-broadcast:** send same tx to Helius default (dual SWQoS+Jito), regional Helius HTTP endpoints, QuickNode, bloXroute, Nozomi, Triton in parallel
+6. **Non-Jupiter fallback:** Raydium/Orca/Meteora/PumpSwap direct SDKs for tokens Jupiter can't route; PumpFun AMM for ungraduated bonding-curve tokens
+
+**When to escalate:**
+- Landing rate < 90% over 1h window → SLO alert fires → consider escalation 3
+- Repeated `expired` outcomes during high network congestion → escalation 3 or 4
+- `no_route` from Jupiter on ungraduated token → escalation 6 (PumpFun AMM — planned, see M-pumpfun-router)
+- Helius Sender consistently 500ing → already falls back to RPC (escalation 2); long-term fix is escalation 3
+
+**Known gaps in current path (I9):**
+- No Jito MEV auction = lower block inclusion priority vs full-Jito bots during congestion
+- SWQoS routing is best-effort; no auction guarantee
+- These gaps are acceptable at current trade size; revisit at production scale-up (M9)
 
 ---
 

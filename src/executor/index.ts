@@ -1,7 +1,9 @@
 import type { QuoteResponse } from "@jup-ag/api";
 import {
+  AccountRole,
   type Address,
   address,
+  appendTransactionMessageInstructions,
   type Base64EncodedWireTransaction,
   type Blockhash,
   decompileTransactionMessage,
@@ -33,7 +35,6 @@ import {
 } from "./jito.js";
 import {
   createHeliusSenderClient,
-  createHeliusSenderTipTransaction,
   HeliusSenderSyncError,
   type HeliusSenderClient,
 } from "./helius-sender.js";
@@ -108,10 +109,16 @@ type SloQueryResult = {
 
 type SloQueryFn = (windowStartSeconds: number) => Promise<SloQueryResult>;
 
+type TipInstruction = {
+  tipAccount: Address;
+  tipLamports: bigint;
+};
+
 type BuildSwapTxFn = (
   base64Tx: string,
   wallet: Awaited<ReturnType<typeof getTradingSigner>>,
   connection: ChainClient,
+  tip?: TipInstruction,
 ) => Promise<{ transaction: Awaited<ReturnType<typeof signTransactionMessageWithSigners>> }>;
 
 type ExecutorDependencies = {
@@ -194,7 +201,7 @@ function defaultDependencies(): Promise<ExecutorDependencies> {
   const rpc = getSolanaRpc();
   return Promise.resolve({
     connection: createChainClient(rpc),
-    buildSwapTx: (base64Tx: string, wallet: Awaited<ReturnType<typeof getTradingSigner>>, connection: ChainClient) => deserializeAndSign(base64Tx, wallet, connection, rpc),
+    buildSwapTx: (base64Tx: string, wallet: Awaited<ReturnType<typeof getTradingSigner>>, connection: ChainClient, tip?: TipInstruction) => deserializeAndSign(base64Tx, wallet, connection, rpc, tip),
     quoteClient: {
       getQuote,
       getSwap,
@@ -310,6 +317,7 @@ export async function executeTokenSellWithDependencies(
       swapResponse.swapTransaction,
       deps.wallet,
       deps.connection,
+      resolveHeliusTip(deps),
     );
     signature = getSignatureFromTransaction(builtTransaction.transaction);
     const signedWireTransaction = getBase64EncodedWireTransaction(
@@ -427,6 +435,7 @@ export async function executeSignalWithDependencies(
       swapResponse.swapTransaction,
       deps.wallet,
       deps.connection,
+      resolveHeliusTip(deps),
     );
 
     signature = getSignatureFromTransaction(builtTransaction.transaction);
@@ -756,11 +765,15 @@ function createChainClient(rpc: ReturnType<typeof getSolanaRpc>): ChainClient {
   };
 }
 
-async function deserializeAndSign(
+const SYSTEM_PROGRAM_ADDRESS = address("11111111111111111111111111111111");
+
+/** @internal exported for testing only */
+export async function deserializeAndSign(
   base64Tx: string,
   wallet: Awaited<ReturnType<typeof getTradingSigner>>,
   connection: ChainClient,
   rpc: Parameters<typeof decompileTransactionMessageFetchingLookupTables>[1],
+  tip?: TipInstruction,
 ): Promise<{
   transaction: Awaited<ReturnType<typeof signTransactionMessageWithSigners>>;
 }> {
@@ -780,10 +793,31 @@ async function deserializeAndSign(
     : decompileTransactionMessage(compiledMessage, { addressesByLookupTableAddress: {} });
 
   const latestBlockhash = await connection.getLatestBlockhash("confirmed");
-  const updatedMessage = setTransactionMessageLifetimeUsingBlockhash(
+  const withFeePayer = setTransactionMessageFeePayerSigner(wallet, txMessage);
+  const withBlockhash = setTransactionMessageLifetimeUsingBlockhash(
     { blockhash: latestBlockhash.blockhash, lastValidBlockHeight: BigInt(latestBlockhash.lastValidBlockHeight) },
-    setTransactionMessageFeePayerSigner(wallet, txMessage),
+    withFeePayer,
   );
+
+  const updatedMessage = tip
+    ? appendTransactionMessageInstructions(
+        [{
+          programAddress: SYSTEM_PROGRAM_ADDRESS,
+          accounts: [
+            { address: address(wallet.address), role: AccountRole.WRITABLE_SIGNER },
+            { address: tip.tipAccount, role: AccountRole.WRITABLE },
+          ],
+          data: (() => {
+            const d = new Uint8Array(12);
+            const v = new DataView(d.buffer);
+            v.setUint32(0, 2, true);
+            v.setBigUint64(4, tip.tipLamports, true);
+            return d;
+          })(),
+        }],
+        withBlockhash,
+      )
+    : withBlockhash;
 
   const transaction = await signTransactionMessageWithSigners(updatedMessage);
 
@@ -812,20 +846,6 @@ async function submitBuiltTransaction(input: {
     }
 
     try {
-      const latestBlockhash = await input.deps.connection.getLatestBlockhash("confirmed");
-      const tipTx = await createHeliusSenderTipTransaction({
-        wallet: input.deps.wallet,
-        tipAccount: input.deps.heliusSenderClient.getTipAccount(),
-        tipLamports: input.deps.heliusSenderTipLamports ?? BigInt(config.HELIUS_SENDER_TIP_LAMPORTS),
-        latestBlockhash: {
-          blockhash: latestBlockhash.blockhash,
-          lastValidBlockHeight: BigInt(latestBlockhash.lastValidBlockHeight),
-        },
-      });
-      await input.deps.heliusSenderClient.sendTransaction(tipTx.base64WireTransaction, {
-        skipPreflight: true,
-        maxRetries: 0,
-      });
       await input.deps.heliusSenderClient.sendTransaction(input.signedWireTransaction, {
         skipPreflight: true,
         maxRetries: 0,
@@ -894,6 +914,15 @@ async function submitBuiltTransaction(input: {
   return "rpc";
 }
 
+function resolveHeliusTip(deps: ExecutorDependencies): TipInstruction | undefined {
+  if (resolveSubmissionMode(deps) !== "helius_sender") return undefined;
+  if (!deps.heliusSenderClient) return undefined;
+  return {
+    tipAccount: deps.heliusSenderClient.getTipAccount(),
+    tipLamports: deps.heliusSenderTipLamports ?? BigInt(config.HELIUS_SENDER_TIP_LAMPORTS),
+  };
+}
+
 function resolveSubmissionMode(deps: ExecutorDependencies): SubmissionMode {
   if (deps.submissionMode) {
     return deps.submissionMode;
@@ -924,23 +953,25 @@ async function submitViaRpc(input: {
     maxRetries: 0,
   });
 
-  // Rebroadcast every 2s until block height expires (Helius/Jito handle retransmission themselves).
-  const startedAt = input.deps.now();
-  while (input.deps.now() - startedAt < CONFIRM_TIMEOUT_MS) {
-    await input.deps.sleep(RPC_REBROADCAST_INTERVAL_MS);
-    const blockHeight = await input.deps.connection.getBlockHeight("confirmed");
-    if (blockHeight > input.lastValidBlockHeight) {
-      break;
+  // Rebroadcast in background every 2s until block height expires — does not block confirmation polling.
+  void (async () => {
+    const startedAt = input.deps.now();
+    while (input.deps.now() - startedAt < CONFIRM_TIMEOUT_MS) {
+      await input.deps.sleep(RPC_REBROADCAST_INTERVAL_MS);
+      const blockHeight = await input.deps.connection.getBlockHeight("confirmed");
+      if (blockHeight > input.lastValidBlockHeight) {
+        break;
+      }
+      try {
+        await input.deps.connection.sendTransaction(input.signedWireTransaction, {
+          skipPreflight: true,
+          maxRetries: 0,
+        });
+      } catch {
+        // Ignore rebroadcast errors — tx may already be confirmed.
+      }
     }
-    try {
-      await input.deps.connection.sendTransaction(input.signedWireTransaction, {
-        skipPreflight: true,
-        maxRetries: 0,
-      });
-    } catch {
-      // Ignore rebroadcast errors — tx may already be confirmed.
-    }
-  }
+  })();
 }
 
 async function pollForConfirmation(
