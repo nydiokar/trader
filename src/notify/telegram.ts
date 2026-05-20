@@ -65,7 +65,7 @@ export function formatSignalReceived(input: {
     mode?: string;
   };
 }): string {
-  const price = input.entryPriceUsd != null ? ` @ $${input.entryPriceUsd.toFixed(4)}` : "";
+  const price = input.entryPriceUsd != null ? ` @ ${formatUsdPrice(input.entryPriceUsd)}` : "";
   const sizeStr =
     input.finalAmountSol != null && input.finalAmountSol !== input.amountSol
       ? `${input.finalAmountSol} SOL (capped from ${input.amountSol})`
