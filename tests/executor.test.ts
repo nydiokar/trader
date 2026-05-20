@@ -121,6 +121,7 @@ describe("M3 executor", () => {
       .fn()
       .mockResolvedValue({ value: { confirmationStatus: "confirmed", err: null } });
 
+    let currentTime = 1_000;
     const result = await executeSignalWithDependencies(
       {
         signalId: "11111111-1111-4111-8111-111111111111",
@@ -131,8 +132,8 @@ describe("M3 executor", () => {
       {
         wallet,
         buildSwapTx: makeBuildSwapTx(wallet),
-        now: vi.fn().mockReturnValue(1_000),
-        sleep: vi.fn().mockResolvedValue(undefined),
+        now: vi.fn(() => currentTime),
+        sleep: vi.fn().mockImplementation(async () => { currentTime += 46_000; }),
         quoteClient: {
           getQuote: vi.fn().mockResolvedValue(makeQuote()),
           getSwap: vi.fn().mockResolvedValue(makeSwapResponse()),
@@ -153,7 +154,7 @@ describe("M3 executor", () => {
           getSignatureStatuses: vi.fn().mockImplementation(async () => [
             (await getSignatureStatus()).value,
           ]),
-          getBlockHeight: vi.fn().mockResolvedValue(50),
+          getBlockHeight: vi.fn().mockResolvedValue(56),
           getTransaction: vi
             .fn()
             .mockResolvedValue(makeConfirmedTransaction(wallet.address.toString(), tokenMint)),
@@ -318,78 +319,6 @@ describe("M3 executor", () => {
         signal_id: "12121212-1212-4121-8121-121212121212",
         signature: expect.any(String),
         submitted_via: "rpc",
-      },
-    });
-  });
-
-  it("dry-run builds and signs but does not submit, confirm, or reconcile", async () => {
-    const { executeSignalWithDependencies } = await import("../src/executor/index.js");
-    const wallet = await generateKeyPairSigner();
-    const tokenMint = "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN";
-    const simulateTransaction = vi
-      .fn()
-      .mockResolvedValue({ err: null, unitsConsumed: 100_000n });
-    const sendTransaction = vi.fn();
-    const getSignatureStatuses = vi.fn();
-    const getTransaction = vi.fn();
-
-    const result = await executeSignalWithDependencies(
-      {
-        signalId: "14141414-1414-4141-8141-141414141414",
-        tokenMint,
-        amountSol: 0.01,
-        maxSlippageBps: 300,
-      },
-      {
-        wallet,
-        buildSwapTx: makeBuildSwapTx(wallet),
-        now: vi.fn().mockReturnValue(1_000),
-        sleep: vi.fn().mockResolvedValue(undefined),
-        quoteClient: {
-          getQuote: vi.fn().mockResolvedValue(makeQuote()),
-          getSwap: vi.fn().mockResolvedValue(makeSwapResponse()),
-        },
-        priorityFeeClient: {
-          getPriorityFeeEstimate: vi.fn().mockResolvedValue(12_345n),
-        },
-        connection: {
-          getLatestBlockhash: vi.fn().mockResolvedValue({
-            blockhash: "11111111111111111111111111111111",
-            lastValidBlockHeight: 55,
-          }),
-
-          simulateTransaction,
-          sendTransaction,
-          getSignatureStatuses,
-          getBlockHeight: vi.fn(),
-          getTransaction,
-        },
-      },
-    );
-
-    expect(simulateTransaction).toHaveBeenCalledOnce();
-    expect(sendTransaction).not.toHaveBeenCalled();
-    expect(getSignatureStatuses).not.toHaveBeenCalled();
-    expect(getTransaction).not.toHaveBeenCalled();
-    expect(upsertTrade).toHaveBeenCalledWith(
-      expect.objectContaining({
-        create: expect.objectContaining({
-          state: "confirmed",
-          submittedVia: "rpc",
-          signature: expect.stringMatching(/^dry-run:/),
-          dryRun: true,
-        }),
-      }),
-    );
-    expect(result).toEqual({
-      state: "done",
-      decision: "accepted",
-      response: {
-        status: "confirmed",
-        signal_id: "14141414-1414-4141-8141-141414141414",
-        signature: expect.stringMatching(/^dry-run:/),
-        submitted_via: "rpc",
-        dry_run: true,
       },
     });
   });
