@@ -121,9 +121,11 @@ export async function handleFlowExitSignal(signal: FlowExitSignal): Promise<Flow
     return claim.result;
   }
 
-  const tokenAmountRaw =
-    claim.row.tokenAmountRaw ?? signal.token_amount_raw ?? (await getWalletTokenBalanceRaw(signal.token_mint));
-  if (BigInt(tokenAmountRaw) <= 0n) {
+  const liveBalance = await getWalletTokenBalanceRaw(signal.token_mint);
+  const tokenAmountRaw = BigInt(liveBalance) > 0n
+    ? liveBalance
+    : claim.row.tokenAmountRaw ?? signal.token_amount_raw ?? liveBalance;
+  if (BigInt(liveBalance) <= 0n) {
     const row = await upsertExitRow(signal, {
       state: "sell_failed",
       dryRun: false,
@@ -164,13 +166,15 @@ export async function handleFlowExitSignal(signal: FlowExitSignal): Promise<Flow
 
   if (result.state !== "done" || result.response.status !== "confirmed") {
     const error = result.decision;
+    const errorKind = result.response.error_kind;
+    const errorReason = result.retriesExhausted ? "retries_exhausted" : (errorKind ?? error);
     await upsertExitRow(signal, {
       state: "sell_failed",
       dryRun: false,
       tokenAmountRaw,
       signature: result.response.signature,
-      errorReason: error,
-      errorMessage: error,
+      errorReason,
+      errorMessage: errorKind ? `${error}: ${errorKind}` : error,
       completedAt: new Date(),
     });
     notify(
@@ -255,7 +259,7 @@ async function executeTokenSellWithRuntimeRetries(input: {
   maxRetrySlippageBps: number;
   retryDelayMs: number;
   signal: FlowExitSignal;
-}): ReturnType<typeof executeTokenSell> {
+}): Promise<Awaited<ReturnType<typeof executeTokenSell>> & { retriesExhausted: boolean }> {
   const totalAttempts = Math.max(1, input.retryAttempts);
   let finalResult: Awaited<ReturnType<typeof executeTokenSell>> | null = null;
   let slippageStepIndex = 0;
@@ -341,7 +345,11 @@ async function executeTokenSellWithRuntimeRetries(input: {
   if (!finalResult) {
     throw new Error("exit sell execution did not run");
   }
-  return finalResult;
+  const retriesExhausted =
+    finalResult.state === "failed" &&
+    finalResult.decision === "pre_submit_failed" &&
+    !finalResult.response.signature;
+  return { ...finalResult, retriesExhausted };
 }
 
 async function claimExitForLiveSell(signal: FlowExitSignal): Promise<
@@ -376,6 +384,11 @@ async function claimExitForLiveSell(signal: FlowExitSignal): Promise<
   }
   if (existing.state === "sell_confirmed_close_pending") {
     return { kind: "blocked", result: await retryCloseOnly(signal, existing) };
+  }
+
+  const terminalErrorReasons = ["no_route", "simulation_failed", "zero_token_balance", "sell_execution_disabled", "retries_exhausted"];
+  if (existing.errorReason && terminalErrorReasons.includes(existing.errorReason)) {
+    return { kind: "blocked", result: terminalResult(signal, existing, "already_processed") };
   }
 
   const claimableStates = ["sell_failed", "failed"];

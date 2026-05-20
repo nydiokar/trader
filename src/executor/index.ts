@@ -827,7 +827,10 @@ export async function deserializeAndSign(
   // Simulate with replaceRecentBlockhash so stale blockhashes don't cause false failures.
   const simulation = await connection.simulateTransaction(signedBase64);
   if (simulation.err) {
-    throw new Error(`swap simulation failed: ${JSON.stringify(simulation.err)}`);
+    throw new JupiterApiError(
+      "simulation_failed",
+      `swap simulation failed: ${JSON.stringify(simulation.err, (_k, v) => (typeof v === "bigint" ? v.toString() : v))}`,
+    );
   }
 
   return { transaction };
