@@ -60,7 +60,7 @@ export function formatSignalReceived(input: {
   intelligence?: {
     lane: string;
     action: string;
-    confidence?: number;
+    confidence?: string;
     vectorHits?: string[];
     mode?: string;
   };
@@ -78,7 +78,7 @@ export function formatSignalReceived(input: {
   if (input.intelligence) {
     const { lane, action, confidence, vectorHits, mode } = input.intelligence;
     lines.push(`Lane: ${lane} | Action: ${action}${mode ? ` | Mode: ${mode}` : ""}`);
-    if (confidence != null) lines.push(`Confidence: ${(confidence * 100).toFixed(1)}%`);
+    if (confidence != null) lines.push(`Confidence: ${confidence}`);
     if (vectorHits && vectorHits.length > 0) lines.push(`Vectors: ${vectorHits.slice(0, 5).join(", ")}`);
   }
   if (input.exitPolicy) lines.push(`Exit: ${input.exitPolicy}`);

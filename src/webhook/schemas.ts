@@ -3,13 +3,16 @@ import { z } from "zod";
 export const IntelligenceDecision = z.object({
   action: z.string(),
   lane: z.string(),
-  confidence: z.number().optional(),
+  confidence: z.string().optional(),
   vector_hits: z.array(z.string()).optional(),
   risk_notes: z.array(z.string()).optional(),
+  reasons: z.array(z.string()).optional(),
   amount_sol: z.number().optional(),
   planned_exit_policy_label: z.string().optional(),
-  reason: z.string().optional(),
   mode: z.string().optional(),
+  version: z.string().optional(),
+  max_slippage_bps: z.number().optional(),
+  metrics: z.record(z.string(), z.unknown()).optional(),
 });
 
 export type IntelligenceDecisionType = z.infer<typeof IntelligenceDecision>;
