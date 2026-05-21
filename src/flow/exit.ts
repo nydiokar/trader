@@ -121,7 +121,18 @@ export async function handleFlowExitSignal(signal: FlowExitSignal): Promise<Flow
     return claim.result;
   }
 
-  const liveBalance = await getWalletTokenBalanceRaw(signal.token_mint);
+  let liveBalance: string;
+  try {
+    liveBalance = await getWalletTokenBalanceRaw(signal.token_mint);
+  } catch (err) {
+    // RPC failure — release the claim so the next poller tick can retry cleanly
+    await db.flowExitExecution.update({
+      where: { positionId: signal.position_id },
+      data: { state: "sell_failed", errorReason: "rpc_error", errorMessage: err instanceof Error ? err.message : String(err), completedAt: new Date() },
+    });
+    logger.error({ err, position_id: signal.position_id }, "balance RPC failed — released claim for retry");
+    return { status: "failed", position_id: signal.position_id, journal_id: claim.row.id, error: "rpc_error" };
+  }
   const tokenAmountRaw = BigInt(liveBalance) > 0n
     ? liveBalance
     : claim.row.tokenAmountRaw ?? signal.token_amount_raw ?? liveBalance;
@@ -416,11 +427,11 @@ async function claimExitForLiveSell(signal: FlowExitSignal): Promise<
     return { kind: "blocked", result: await retryCloseOnly(signal, existing) };
   }
   if (existing.state === "processing") {
-    // If stuck in processing for >10 min the process that claimed it is dead — reset so it can be retried
     const stuckMs = Date.now() - existing.updatedAt.getTime();
     if (stuckMs < 10 * 60 * 1000) {
       return { kind: "blocked", result: terminalResult(signal, existing, "already_processing") };
     }
+    // Crashed mid-sell — reset and recurse so the fresh DB state is read cleanly
     logger.warn(
       { position_id: signal.position_id, stuck_minutes: Math.floor(stuckMs / 60_000) },
       "processing row timed out — resetting to sell_failed for retry",
@@ -429,7 +440,7 @@ async function claimExitForLiveSell(signal: FlowExitSignal): Promise<
       where: { positionId: signal.position_id },
       data: { state: "sell_failed", errorReason: "processing_timeout", errorMessage: "stuck in processing — reset by poller", completedAt: new Date() },
     });
-    // Fall through to claimable states below
+    return claimExitForLiveSell(signal);
   }
   if (existing.state === "sell_confirmed_close_pending") {
     return { kind: "blocked", result: await retryCloseOnly(signal, existing) };
@@ -530,6 +541,7 @@ async function refreshClosePendingGauge(): Promise<void> {
 
 const CLOSE_PENDING_ALERT_MINUTES = 10;
 const CLOSE_PENDING_ESCALATION_MINUTES = 30;
+const CLOSE_PENDING_DEAD_LETTER_HOURS = 24;
 
 export type RecoverClosePendingResult = {
   recovered: number;
@@ -571,8 +583,23 @@ export async function recoverClosePending(): Promise<RecoverClosePendingResult> 
     const stuckMs = now - row.updatedAt.getTime();
     const stuckMinutes = Math.floor(stuckMs / 60_000);
     const escalationThresholdMs = CLOSE_PENDING_ESCALATION_MINUTES * 60 * 1000;
+    const deadLetterMs = CLOSE_PENDING_DEAD_LETTER_HOURS * 60 * 60 * 1000;
+
+    // After 24h give up retrying — mark dead_letter so it stops polluting the gauge
+    if (stuckMs >= deadLetterMs) {
+      await db.flowExitExecution.update({
+        where: { positionId: row.positionId },
+        data: { state: "sell_failed", errorReason: "close_callback_dead_letter", errorMessage: `close callback failed for ${CLOSE_PENDING_DEAD_LETTER_HOURS}h — manual intervention required`, completedAt: new Date() },
+      });
+      notify(
+        `🚨 <b>CLOSE CALLBACK DEAD LETTER</b>\nPosition: <code>${row.positionId}</code>\nToken: <code>${row.tokenMint}</code>\nStuck ${stuckMinutes}m — sell confirmed on-chain but tokens_ingest never acknowledged. Manual fix required.`,
+      ).catch(() => {});
+      stillPending++;
+      continue;
+    }
+
     // Alert at the 10-min mark and again at the 30-min mark — not on every poll pass
-    const alertWindowMs = 10 * 60 * 1000; // 10-minute window around each threshold
+    const alertWindowMs = 10 * 60 * 1000;
     const crossedInitialThreshold = stuckMs >= alertThresholdMs && stuckMs < alertThresholdMs + alertWindowMs;
     const crossedEscalationThreshold = stuckMs >= escalationThresholdMs && stuckMs < escalationThresholdMs + alertWindowMs;
     if (crossedInitialThreshold || crossedEscalationThreshold) {
@@ -692,20 +719,25 @@ async function upsertExitRow(
 
 async function getWalletTokenBalanceRaw(tokenMint: string): Promise<string> {
   const signer = await getTradingSigner();
-  const response = await fetch(config.HELIUS_RPC_URL, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: "flow-exit-token-balance",
-      method: "getTokenAccountsByOwner",
-      params: [
-        signer.address.toString(),
-        { programId: TOKEN_PROGRAM_ID },
-        { encoding: "jsonParsed" },
-      ],
-    }),
-  });
+  let response: Response;
+  try {
+    response = await fetch(config.HELIUS_RPC_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: "flow-exit-token-balance",
+        method: "getTokenAccountsByOwner",
+        params: [
+          signer.address.toString(),
+          { mint: tokenMint },
+          { encoding: "jsonParsed" },
+        ],
+      }),
+    });
+  } catch (err) {
+    throw new Error(`token balance RPC network error: ${err instanceof Error ? err.message : String(err)}`);
+  }
   if (!response.ok) {
     throw new Error(`token balance RPC failed: HTTP ${response.status}`);
   }
@@ -717,7 +749,6 @@ async function getWalletTokenBalanceRaw(tokenMint: string): Promise<string> {
           data?: {
             parsed?: {
               info?: {
-                mint?: string;
                 tokenAmount?: { amount?: string };
               };
             };
@@ -731,9 +762,7 @@ async function getWalletTokenBalanceRaw(tokenMint: string): Promise<string> {
   }
 
   const total = (payload.result?.value ?? []).reduce((sum, account) => {
-    const info = account.account?.data?.parsed?.info;
-    if (info?.mint !== tokenMint) return sum;
-    const amount = info.tokenAmount?.amount;
+    const amount = account.account?.data?.parsed?.info?.tokenAmount?.amount;
     return amount && /^\d+$/.test(amount) ? sum + BigInt(amount) : sum;
   }, 0n);
 
@@ -754,16 +783,7 @@ async function resolveManualSellFromChain(
 ): Promise<{ solReceived: number; signature: string } | null> {
   if (!config.HELIUS_API_KEY) return null;
 
-  const url = `https://api.helius.xyz/v0/addresses/${walletAddress}/transactions?api-key=${config.HELIUS_API_KEY}&limit=100&type=SWAP`;
-  let response: Response;
-  try {
-    response = await fetch(url);
-  } catch {
-    return null;
-  }
-  if (!response.ok) return null;
-
-  const txs = (await response.json()) as Array<{
+  type HeliusTx = {
     signature: string;
     accountData?: Array<{
       account?: string;
@@ -774,27 +794,47 @@ async function resolveManualSellFromChain(
         rawTokenAmount?: { tokenAmount?: string };
       }>;
     }>;
-  }>;
+  };
 
-  for (const tx of txs) {
-    // Find an accountData entry for this wallet that had a negative token balance change for our mint
-    const hasSell = (tx.accountData ?? []).some((entry) =>
-      (entry.tokenBalanceChanges ?? []).some(
-        (c) =>
-          c.mint === tokenMint &&
-          c.userAccount === walletAddress &&
-          c.rawTokenAmount?.tokenAmount?.startsWith("-"),
-      ),
-    );
-    if (!hasSell) continue;
+  const MAX_PAGES = 5; // 5 × 100 = 500 txs lookback
+  let before: string | undefined;
 
-    // Net SOL change for the wallet in this tx (can be negative if fees exceeded proceeds)
-    const walletEntry = (tx.accountData ?? []).find((e) => e.account === walletAddress);
-    const lamports = walletEntry?.nativeBalanceChange ?? 0;
-    return {
-      solReceived: lamports / LAMPORTS_PER_SOL,
-      signature: tx.signature,
-    };
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const url = new URL(`https://api.helius.xyz/v0/addresses/${walletAddress}/transactions`);
+    url.searchParams.set("api-key", config.HELIUS_API_KEY);
+    url.searchParams.set("limit", "100");
+    url.searchParams.set("type", "SWAP");
+    if (before) url.searchParams.set("before", before);
+
+    let response: Response;
+    try {
+      response = await fetch(url.toString());
+    } catch {
+      return null;
+    }
+    if (!response.ok) return null;
+
+    const txs = (await response.json()) as HeliusTx[];
+    if (txs.length === 0) return null;
+
+    for (const tx of txs) {
+      const hasSell = (tx.accountData ?? []).some((entry) =>
+        (entry.tokenBalanceChanges ?? []).some(
+          (c) =>
+            c.mint === tokenMint &&
+            c.userAccount === walletAddress &&
+            c.rawTokenAmount?.tokenAmount?.startsWith("-"),
+        ),
+      );
+      if (!hasSell) continue;
+
+      const walletEntry = (tx.accountData ?? []).find((e) => e.account === walletAddress);
+      const lamports = walletEntry?.nativeBalanceChange ?? 0;
+      return { solReceived: lamports / LAMPORTS_PER_SOL, signature: tx.signature };
+    }
+
+    // Paginate using the last tx signature as cursor
+    before = txs[txs.length - 1]!.signature;
   }
 
   return null;
