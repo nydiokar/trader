@@ -120,6 +120,8 @@ model FlowDryRunAttempt {
 
 // Durable journal for ES exit/sell handling. Dry-run rows are the ES-4 validation
 // path; live rows record the sell outcome and tokens_ingest close callback status.
+// Buy-side fields (tradeId, entrySignature, entryConfirmedAt, entryQuantityRaw) are
+// populated when the exit signal arrives — linked via signal_id echoed by Flow.
 model FlowExitExecution {
   id                    String    @id @default(uuid())
   positionId            String    @unique @map("position_id")
@@ -141,6 +143,13 @@ model FlowExitExecution {
   closeCallbackResponse String?   @map("close_callback_response")
   errorReason           String?   @map("error_reason")
   errorMessage          String?   @map("error_message")
+  // Buy-side linkage: populated on first upsert when Flow echoes signal_id
+  tradeId               Int?      @map("trade_id")
+  entrySignature        String?   @map("entry_signature")
+  entryConfirmedAt      DateTime? @map("entry_confirmed_at")
+  entryQuantityRaw      String?   @map("entry_quantity_raw")
+  interventionFlag      Boolean   @default(false) @map("intervention_flag")
+  interventionReason    String?   @map("intervention_reason")
   createdAt             DateTime  @default(now()) @map("created_at")
   updatedAt             DateTime  @updatedAt @map("updated_at")
   completedAt           DateTime? @map("completed_at")

@@ -15,6 +15,8 @@
     "ops:positions": "tsx src/ops/positions.ts",
     "ops:sell": "tsx src/ops/sell.ts",
     "ops:alert-smoke": "tsx src/ops/alert-smoke.ts",
+    "ops:report": "tsx src/ops/report.ts",
+    "ops:canary-inspector": "tsx src/ops/canary-inspector.ts",
     "build": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
