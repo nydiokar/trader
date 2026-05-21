@@ -126,26 +126,42 @@ export async function handleFlowExitSignal(signal: FlowExitSignal): Promise<Flow
     ? liveBalance
     : claim.row.tokenAmountRaw ?? signal.token_amount_raw ?? liveBalance;
   if (BigInt(liveBalance) <= 0n) {
+    // Token is gone from wallet — likely a manual sell. Zero balance IS the
+    // on-chain proof. Notify Flow so it removes the position from exit-pending
+    // instead of looping forever.
+    logger.warn(
+      { position_id: signal.position_id, token_mint: signal.token_mint },
+      "zero token balance detected — assuming manual sell, closing position on Flow",
+    );
+    const closeResult = await closePosition(signal.position_id, "manually_sold");
     const row = await upsertExitRow(signal, {
-      state: "sell_failed",
+      state: closeResult.ok ? "closed" : "sell_confirmed_close_pending",
       dryRun: false,
       tokenAmountRaw,
-      errorReason: "zero_token_balance",
-      errorMessage: "wallet token balance is zero",
-      completedAt: new Date(),
+      closeReason: "manually_sold",
+      closeCallbackStatus: closeResult.status,
+      closeCallbackResponse: closeResult.body,
+      errorReason: closeResult.ok ? null : "position_close_failed",
+      errorMessage: closeResult.ok ? null : closeResult.body,
+      completedAt: closeResult.ok ? new Date() : null,
     });
-    notify(
-      formatExitFailed({
-        tokenMint: signal.token_mint,
-        positionId: signal.position_id,
-        error: "zero_token_balance",
-      }),
-    ).catch((err) => logger.warn({ err }, "telegram exit-failed notification failed"));
+    if (closeResult.ok) {
+      notify(
+        `✅ <b>MANUAL SELL DETECTED</b>\nToken: <code>${signal.token_mint}</code>\nPosition: <code>${signal.position_id}</code>\nWallet balance was zero — position closed on Flow.`,
+      ).catch((err) => logger.warn({ err }, "telegram manual-sell notification failed"));
+    } else {
+      exitsClosePending.inc();
+      logger.warn(
+        { position_id: signal.position_id, close_callback_status: closeResult.status },
+        "manual sell: Flow close callback failed — will retry via close_pending recovery",
+      );
+    }
+    await refreshClosePendingGauge();
     return {
-      status: "failed",
+      status: closeResult.ok ? "closed" : "close_pending",
       position_id: signal.position_id,
       journal_id: row.id,
-      error: "zero_token_balance",
+      error: closeResult.ok ? undefined : "position_close_failed",
     };
   }
 
@@ -377,7 +393,9 @@ async function claimExitForLiveSell(signal: FlowExitSignal): Promise<
   }
 
   if (existing.state === "closed") {
-    return { kind: "blocked", result: terminalResult(signal, existing, "already_processed") };
+    // Already closed locally — but Flow keeps returning it, meaning our close
+    // callback never reached it. Retry the callback; Flow is idempotent on this.
+    return { kind: "blocked", result: await retryCloseOnly(signal, existing) };
   }
   if (existing.state === "processing") {
     return { kind: "blocked", result: terminalResult(signal, existing, "already_processing") };
@@ -386,12 +404,11 @@ async function claimExitForLiveSell(signal: FlowExitSignal): Promise<
     return { kind: "blocked", result: await retryCloseOnly(signal, existing) };
   }
 
-  const terminalErrorReasons = ["no_route", "simulation_failed", "zero_token_balance", "sell_execution_disabled", "retries_exhausted"];
-  if (existing.errorReason && terminalErrorReasons.includes(existing.errorReason)) {
+  const claimableStates = ["sell_failed", "failed"];
+  const terminalErrorReasons = ["no_route", "simulation_failed", "sell_execution_disabled", "retries_exhausted"];
+  if (existing.errorReason && terminalErrorReasons.includes(existing.errorReason) && !claimableStates.includes(existing.state)) {
     return { kind: "blocked", result: terminalResult(signal, existing, "already_processed") };
   }
-
-  const claimableStates = ["sell_failed", "failed"];
   if (!claimableStates.includes(existing.state)) {
     return { kind: "blocked", result: terminalResult(signal, existing, "already_processing") };
   }
