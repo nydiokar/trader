@@ -215,10 +215,10 @@ async function main(): Promise<void> {
 
   const { getLiveSettings } = await import("../runtime/live-settings.js");
   const settings = await getLiveSettings();
-  args.maxSlippageBps ??= settings.maxSlippageBps;
+  args.maxSlippageBps ??= settings.sellMaxSlippageBps;
   args.retryAttempts ??= settings.sellRetryAttempts;
-  args.retrySlippageStepBps ??= settings.retrySlippageStepBps;
-  args.maxRetrySlippageBps ??= settings.maxRetrySlippageBps;
+  args.retrySlippageStepBps ??= settings.sellRetrySlippageStepBps;
+  args.maxRetrySlippageBps ??= settings.sellMaxRetrySlippageBps;
 
   const mint = args.mint ?? fail("--mint is required");
   const maxSlippageBps = args.maxSlippageBps ?? fail("missing maxSlippageBps");

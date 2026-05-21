@@ -387,9 +387,9 @@ describe("live flow exit sell retries", () => {
       );
       expect(executeTokenSellMock).toHaveBeenCalledTimes(3);
       expect(executeTokenSellMock.mock.calls.map(([input]) => input.maxSlippageBps)).toEqual([
-        600,
-        1000,
-        1400,
+        1500,
+        1900,
+        2300,
       ]);
     } finally {
       await ctx.cleanup();
@@ -446,7 +446,7 @@ describe("live flow exit sell retries", () => {
       expect(result.status).toBe("closed");
       expect(result.signature).toBe("sig123");
       expect(executeTokenSellMock).toHaveBeenCalledTimes(2);
-      expect(executeTokenSellMock.mock.calls.map(([input]) => input.maxSlippageBps)).toEqual([600, 1000]);
+      expect(executeTokenSellMock.mock.calls.map(([input]) => input.maxSlippageBps)).toEqual([1500, 1900]);
     } finally {
       await ctx.cleanup();
       vi.unstubAllGlobals();

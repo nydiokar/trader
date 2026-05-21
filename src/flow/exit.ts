@@ -200,10 +200,10 @@ export async function handleFlowExitSignal(signal: FlowExitSignal): Promise<Flow
     exitId: claim.row.id,
     tokenMint: signal.token_mint,
     tokenAmountRaw,
-    baseSlippageBps: settings.maxSlippageBps,
+    baseSlippageBps: settings.sellMaxSlippageBps,
     retryAttempts: settings.sellRetryAttempts,
-    retrySlippageStepBps: settings.retrySlippageStepBps,
-    maxRetrySlippageBps: settings.maxRetrySlippageBps,
+    retrySlippageStepBps: settings.sellRetrySlippageStepBps,
+    maxRetrySlippageBps: settings.sellMaxRetrySlippageBps,
     retryDelayMs: settings.retryDelayMs,
     signal,
   });
@@ -689,9 +689,41 @@ async function upsertExitRow(
     completedAt?: Date | null;
   },
 ) {
+  // Resolve buy-side fields via the signal_id Flow echoes back from the buy.
+  // We attempt this on every call and only write when the fields are still null
+  // so re-delivered signals (update path) also get linked if the first create
+  // happened before signal_id was available.
+  let tradeId: number | null = null;
+  let entrySignature: string | null = null;
+  let entryConfirmedAt: Date | null = null;
+  let entryQuantityRaw: string | null = null;
+  if (signal.signal_id) {
+    try {
+      const trade = await db.trade.findUnique({
+        where: { signalId: signal.signal_id },
+        select: { id: true, signature: true, confirmedAt: true, amountOutActual: true },
+      });
+      if (trade) {
+        tradeId = trade.id;
+        entrySignature = trade.signature ?? null;
+        // Trade.confirmedAt is Unix epoch seconds; convert to Date for DateTime column
+        entryConfirmedAt = trade.confirmedAt ? new Date(trade.confirmedAt * 1000) : null;
+        entryQuantityRaw = trade.amountOutActual != null ? String(trade.amountOutActual) : null;
+      }
+    } catch (err) {
+      logger.warn({ err, signal_id: signal.signal_id, position_id: signal.position_id }, "buy-side linkage lookup failed");
+    }
+  }
+
+  // Build the update payload: always apply state transitions, but only overwrite
+  // buy-side fields when we actually resolved them (avoids clobbering with nulls).
+  const buySideUpdate = tradeId != null
+    ? { tradeId, entrySignature, entryConfirmedAt, entryQuantityRaw }
+    : {};
+
   return db.flowExitExecution.upsert({
     where: { positionId: signal.position_id },
-    update,
+    update: { ...update, ...buySideUpdate },
     create: {
       positionId: signal.position_id,
       tokenMint: signal.token_mint,
@@ -713,6 +745,10 @@ async function upsertExitRow(
       errorReason: update.errorReason,
       errorMessage: update.errorMessage,
       completedAt: update.completedAt,
+      tradeId,
+      entrySignature,
+      entryConfirmedAt,
+      entryQuantityRaw,
     },
   });
 }

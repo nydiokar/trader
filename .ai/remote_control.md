@@ -57,7 +57,7 @@ pnpm live:settings -- set fee_buffer_sol 0.001
 
 ---
 
-## Slippage
+## Slippage — buys
 
 | What | Key | Default |
 |------|-----|---------|
@@ -69,6 +69,23 @@ pnpm live:settings -- set fee_buffer_sol 0.001
 pnpm live:settings -- set max_slippage_bps 600
 pnpm live:settings -- set retry_slippage_step_bps 400
 pnpm live:settings -- set max_retry_slippage_bps 1500
+```
+
+## Slippage — sells (exit flow)
+
+Sells use a separate, more tolerant ladder — getting out matters more than preserving a few percent.
+Ladder: 15% → 19% → 23% across retry attempts.
+
+| What | Key | Default |
+|------|-----|---------|
+| Initial sell slippage tolerance | `sell_max_slippage_bps` | `1500` (15%) |
+| Step-up per retry on bad quote | `sell_retry_slippage_step_bps` | `400` |
+| Max sell slippage ever allowed | `sell_max_retry_slippage_bps` | `2300` (23%) |
+
+```
+pnpm live:settings -- set sell_max_slippage_bps 1500
+pnpm live:settings -- set sell_retry_slippage_step_bps 400
+pnpm live:settings -- set sell_max_retry_slippage_bps 2300
 ```
 
 ---

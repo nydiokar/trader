@@ -10,6 +10,9 @@ export type LiveSettings = {
   sellRetryAttempts: number;
   retrySlippageStepBps: number;
   maxRetrySlippageBps: number;
+  sellMaxSlippageBps: number;
+  sellRetrySlippageStepBps: number;
+  sellMaxRetrySlippageBps: number;
   retryDelayMs: number;
   walletFloorSol: number;
   feeBufferSol: number;
@@ -98,6 +101,30 @@ const definitions: SettingDefinition[] = [
     storageKey: "max_retry_slippage_bps",
     type: "integer",
     defaultValue: 1_500,
+    min: 1,
+    max: 5_000,
+  },
+  {
+    key: "sellMaxSlippageBps",
+    storageKey: "sell_max_slippage_bps",
+    type: "integer",
+    defaultValue: 1_500,
+    min: 1,
+    max: 5_000,
+  },
+  {
+    key: "sellRetrySlippageStepBps",
+    storageKey: "sell_retry_slippage_step_bps",
+    type: "integer",
+    defaultValue: 400,
+    min: 0,
+    max: 2_000,
+  },
+  {
+    key: "sellMaxRetrySlippageBps",
+    storageKey: "sell_max_retry_slippage_bps",
+    type: "integer",
+    defaultValue: 2_300,
     min: 1,
     max: 5_000,
   },
