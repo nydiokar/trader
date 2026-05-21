@@ -131,13 +131,29 @@ export async function handleFlowExitSignal(signal: FlowExitSignal): Promise<Flow
     // instead of looping forever.
     logger.warn(
       { position_id: signal.position_id, token_mint: signal.token_mint },
-      "zero token balance detected — assuming manual sell, closing position on Flow",
+      "zero token balance detected — assuming manual sell, resolving from chain",
     );
-    const closeResult = await closePosition(signal.position_id, "manually_sold");
+    const signer = await getTradingSigner();
+    const chainSell = await resolveManualSellFromChain(signer.address.toString(), signal.token_mint);
+    if (chainSell) {
+      logger.info(
+        { position_id: signal.position_id, sol_received: chainSell.solReceived, signature: chainSell.signature },
+        "manual sell resolved from chain",
+      );
+    } else {
+      logger.warn({ position_id: signal.position_id }, "manual sell: could not resolve tx from chain, closing with no sell data");
+    }
+    const closeResult = await closePosition(signal.position_id, "manually_sold", chainSell
+      ? { sell_signature: chainSell.signature, sell_sol_received: chainSell.solReceived, sell_submitted_via: "manual" }
+      : undefined,
+    );
     const row = await upsertExitRow(signal, {
       state: closeResult.ok ? "closed" : "sell_confirmed_close_pending",
       dryRun: false,
       tokenAmountRaw,
+      signature: chainSell?.signature ?? null,
+      solReceived: chainSell?.solReceived ?? null,
+      submittedVia: chainSell ? "manual" : null,
       closeReason: "manually_sold",
       closeCallbackStatus: closeResult.status,
       closeCallbackResponse: closeResult.body,
@@ -146,8 +162,10 @@ export async function handleFlowExitSignal(signal: FlowExitSignal): Promise<Flow
       completedAt: closeResult.ok ? new Date() : null,
     });
     if (closeResult.ok) {
+      const solLine = chainSell ? `\nSOL received: ${chainSell.solReceived.toFixed(6)} SOL` : "";
+      const txLine = chainSell ? `\nTx: https://solscan.io/tx/${chainSell.signature}` : "";
       notify(
-        `✅ <b>MANUAL SELL DETECTED</b>\nToken: <code>${signal.token_mint}</code>\nPosition: <code>${signal.position_id}</code>\nWallet balance was zero — position closed on Flow.`,
+        `✅ <b>MANUAL SELL DETECTED</b>\nToken: <code>${signal.token_mint}</code>\nPosition: <code>${signal.position_id}</code>${solLine}${txLine}\nWallet balance was zero — position closed on Flow.`,
       ).catch((err) => logger.warn({ err }, "telegram manual-sell notification failed"));
     } else {
       exitsClosePending.inc();
@@ -398,7 +416,20 @@ async function claimExitForLiveSell(signal: FlowExitSignal): Promise<
     return { kind: "blocked", result: await retryCloseOnly(signal, existing) };
   }
   if (existing.state === "processing") {
-    return { kind: "blocked", result: terminalResult(signal, existing, "already_processing") };
+    // If stuck in processing for >10 min the process that claimed it is dead — reset so it can be retried
+    const stuckMs = Date.now() - existing.updatedAt.getTime();
+    if (stuckMs < 10 * 60 * 1000) {
+      return { kind: "blocked", result: terminalResult(signal, existing, "already_processing") };
+    }
+    logger.warn(
+      { position_id: signal.position_id, stuck_minutes: Math.floor(stuckMs / 60_000) },
+      "processing row timed out — resetting to sell_failed for retry",
+    );
+    await db.flowExitExecution.update({
+      where: { positionId: signal.position_id },
+      data: { state: "sell_failed", errorReason: "processing_timeout", errorMessage: "stuck in processing — reset by poller", completedAt: new Date() },
+    });
+    // Fall through to claimable states below
   }
   if (existing.state === "sell_confirmed_close_pending") {
     return { kind: "blocked", result: await retryCloseOnly(signal, existing) };
@@ -439,7 +470,10 @@ async function retryCloseOnly(
   signal: FlowExitSignal,
   row: Awaited<ReturnType<typeof upsertExitRow>>,
 ): Promise<FlowExitResult> {
-  const closeResult = await closePosition(signal.position_id, signal.trigger_reason, {
+  // Prefer the close reason we already recorded (e.g. "manually_sold") over the
+  // original signal trigger reason so tokens_ingest gets the accurate close reason.
+  const closeReason = row.closeReason ?? signal.trigger_reason;
+  const closeResult = await closePosition(signal.position_id, closeReason, {
     sell_signature: row.signature ?? undefined,
     sell_sol_received: row.solReceived ?? undefined,
     sell_token_amount_raw: row.tokenAmountRaw ?? undefined,
@@ -452,7 +486,7 @@ async function retryCloseOnly(
     signature: row.signature,
     submittedVia: row.submittedVia,
     solReceived: row.solReceived,
-    closeReason: signal.trigger_reason,
+    closeReason,
     closeCallbackStatus: closeResult.status,
     closeCallbackResponse: closeResult.body,
     errorReason: closeResult.ok ? null : "position_close_failed",
@@ -706,6 +740,66 @@ async function getWalletTokenBalanceRaw(tokenMint: string): Promise<string> {
   return total.toString();
 }
 
+const LAMPORTS_PER_SOL = 1_000_000_000;
+
+/**
+ * Queries Helius enhanced transaction history for the trading wallet and finds
+ * the most recent SWAP that moved the given token mint out (negative balance change).
+ * Returns the net SOL received (nativeBalanceChange / LAMPORTS_PER_SOL) and the
+ * transaction signature, or null if no matching tx is found.
+ */
+async function resolveManualSellFromChain(
+  walletAddress: string,
+  tokenMint: string,
+): Promise<{ solReceived: number; signature: string } | null> {
+  if (!config.HELIUS_API_KEY) return null;
+
+  const url = `https://api.helius.xyz/v0/addresses/${walletAddress}/transactions?api-key=${config.HELIUS_API_KEY}&limit=100&type=SWAP`;
+  let response: Response;
+  try {
+    response = await fetch(url);
+  } catch {
+    return null;
+  }
+  if (!response.ok) return null;
+
+  const txs = (await response.json()) as Array<{
+    signature: string;
+    accountData?: Array<{
+      account?: string;
+      nativeBalanceChange?: number;
+      tokenBalanceChanges?: Array<{
+        mint?: string;
+        userAccount?: string;
+        rawTokenAmount?: { tokenAmount?: string };
+      }>;
+    }>;
+  }>;
+
+  for (const tx of txs) {
+    // Find an accountData entry for this wallet that had a negative token balance change for our mint
+    const hasSell = (tx.accountData ?? []).some((entry) =>
+      (entry.tokenBalanceChanges ?? []).some(
+        (c) =>
+          c.mint === tokenMint &&
+          c.userAccount === walletAddress &&
+          c.rawTokenAmount?.tokenAmount?.startsWith("-"),
+      ),
+    );
+    if (!hasSell) continue;
+
+    // Net SOL change for the wallet in this tx (can be negative if fees exceeded proceeds)
+    const walletEntry = (tx.accountData ?? []).find((e) => e.account === walletAddress);
+    const lamports = walletEntry?.nativeBalanceChange ?? 0;
+    return {
+      solReceived: lamports / LAMPORTS_PER_SOL,
+      signature: tx.signature,
+    };
+  }
+
+  return null;
+}
+
 async function closePosition(
   positionId: string,
   closeReason: string,
@@ -726,7 +820,9 @@ async function closePosition(
     body: JSON.stringify({ id: positionId, close_reason: closeReason, ...sellResult }),
   });
   const body = await response.text();
-  return { ok: response.ok, status: String(response.status), body };
+  // 409 means tokens_ingest already has it closed — treat as success
+  const ok = response.ok || response.status === 409;
+  return { ok, status: String(response.status), body };
 }
 
 function tokensIngestHeaders(base: Record<string, string> = {}): Record<string, string> {
