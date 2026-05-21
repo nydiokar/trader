@@ -1,10 +1,9 @@
 /**
  * Position lifecycle inspector.
  *
- * Reconciles confirmed live buy Trade records with ExecutionJournal and
- * FlowExitExecution to produce a complete position ledger. Each confirmed
- * live buy becomes exactly one position record regardless of whether an exit
- * signal has arrived yet.
+ * Reconciles confirmed live buy Trade records with FlowExitExecution to
+ * produce a complete position ledger. Each confirmed live buy becomes exactly
+ * one position record regardless of whether an exit signal has arrived yet.
  *
  * Idempotent: running twice produces the same output for the same DB state.
  *
@@ -24,14 +23,10 @@ export type LifecycleState =
   | "intervention_needed"; // sell_failed, or buy unconfirmed/unlinked
 
 export interface PositionRecord {
-  // Correlation IDs
-  position_id: string | null;  // Flow-assigned; null until exit signal arrives
+  // Buy-side (from Trade — authoritative)
   trade_id: number;
   signal_id: string;
-  journal_id: string | null;
-  // Token
   token_mint: string;
-  // Entry (from Trade — authoritative local record)
   entry_signature: string | null;
   entry_sol_cost: number;
   entry_quantity_raw: string | null;
@@ -41,7 +36,9 @@ export interface PositionRecord {
   intervention_flag: boolean;
   intervention_reason: string | null;
   idempotency_key: string;
-  // Exit (from FlowExitExecution — populated once exit signal arrives)
+  // Exit-side (from FlowExitExecution — only present after Flow sends exit signal)
+  flow_registered: boolean;  // true once Flow has sent an exit signal for this position
+  flow_position_id: string | null;  // Flow-assigned UUID; null until exit signal arrives
   exit_signature: string | null;
   exit_sol_received: number | null;
   exit_completed_at: string | null;
@@ -74,7 +71,6 @@ function deriveLifecycleState(
   tradeState: string,
   exitState: string | null,
 ): { state: LifecycleState; interventionFlag: boolean; interventionReason: string | null } {
-  // Buy did not confirm — needs manual check
   if (tradeState !== "confirmed") {
     return {
       state: "intervention_needed",
@@ -83,7 +79,6 @@ function deriveLifecycleState(
     };
   }
 
-  // No exit signal yet — position is open
   if (exitState === null) {
     return { state: "open", interventionFlag: false, interventionReason: null };
   }
@@ -104,7 +99,6 @@ function deriveLifecycleState(
     return { state: "exit_in_progress", interventionFlag: false, interventionReason: null };
   }
 
-  // Unknown exit state
   return {
     state: "intervention_needed",
     interventionFlag: true,
@@ -118,8 +112,6 @@ export async function buildExport(sinceHours: number): Promise<InspectorExport> 
   const since = new Date(Date.now() - sinceHours * 3_600_000);
   const sinceEpoch = Math.floor(since.getTime() / 1000);
 
-  // Load all confirmed live buy trades in the window.
-  // dryRun:false excludes canary:buy dry-run and test runs.
   const trades = await db.trade.findMany({
     where: {
       dryRun: false,
@@ -128,41 +120,29 @@ export async function buildExport(sinceHours: number): Promise<InspectorExport> 
     orderBy: { createdAt: "asc" },
   });
 
-  // Load all live FlowExitExecution rows — keyed by the signal_id Flow echoes
-  // back so we can join to Trade without relying on tokenMint guessing.
-  // Also index by positionId for the trade_id→positionId path.
-  const exitBySignalId = new Map<string, (typeof allExits)[number]>();
-  const exitByTradeId = new Map<number, (typeof allExits)[number]>();
+  // Index exits by tradeId (primary) and by signal_id parsed from rawSignalJson (fallback
+  // for rows created before the trade_id backfill, or same-delivery race conditions).
   const allExits = await db.flowExitExecution.findMany({
     where: { dryRun: false },
   });
+  const exitByTradeId = new Map<number, (typeof allExits)[number]>();
+  const exitBySignalId = new Map<string, (typeof allExits)[number]>();
   for (const exit of allExits) {
-    if (exit.tradeId != null) exitByTradeId.set(exit.tradeId, exit);
-    // Also parse rawSignalJson for signal_id in case tradeId wasn't linked yet
-    try {
-      const parsed = JSON.parse(exit.rawSignalJson) as { signal_id?: string | null };
-      if (parsed.signal_id) exitBySignalId.set(parsed.signal_id, exit);
-    } catch {
-      // non-fatal
+    if (exit.tradeId != null) {
+      exitByTradeId.set(exit.tradeId, exit);
+    } else {
+      // Fallback: parse signal_id from rawSignalJson for rows still missing tradeId linkage
+      try {
+        const parsed = JSON.parse(exit.rawSignalJson) as { signal_id?: string | null };
+        if (parsed.signal_id) exitBySignalId.set(parsed.signal_id, exit);
+      } catch {
+        // non-fatal
+      }
     }
-  }
-
-  // Load ExecutionJournal entries that are linked to trades in our window,
-  // keyed by tradeId so we can attach journal_id to each position.
-  const tradeIds = trades.map((t) => t.id);
-  const journals = await db.executionJournal.findMany({
-    where: { tradeId: { in: tradeIds } },
-    select: { journalId: true, tradeId: true },
-  });
-  const journalByTradeId = new Map<number, string>();
-  for (const j of journals) {
-    if (j.tradeId != null) journalByTradeId.set(j.tradeId, j.journalId);
   }
 
   const positions: PositionRecord[] = trades.map((trade) => {
     const idempotencyKey = `position:trade:${trade.id}:signal:${trade.signalId}`;
-
-    // Resolve exit: prefer tradeId linkage (authoritative), fall back to signal_id
     const exit = exitByTradeId.get(trade.id) ?? exitBySignalId.get(trade.signalId) ?? null;
 
     const { state, interventionFlag, interventionReason } = deriveLifecycleState(
@@ -171,10 +151,8 @@ export async function buildExport(sinceHours: number): Promise<InspectorExport> 
     );
 
     return {
-      position_id: exit?.positionId ?? null,
       trade_id: trade.id,
       signal_id: trade.signalId,
-      journal_id: journalByTradeId.get(trade.id) ?? null,
       token_mint: trade.tokenMint,
       entry_signature: trade.signature ?? null,
       entry_sol_cost: trade.amountSolIn,
@@ -184,6 +162,8 @@ export async function buildExport(sinceHours: number): Promise<InspectorExport> 
       intervention_flag: interventionFlag,
       intervention_reason: interventionReason ?? null,
       idempotency_key: idempotencyKey,
+      flow_registered: exit !== null,
+      flow_position_id: exit?.positionId ?? null,
       exit_signature: exit?.signature ?? null,
       exit_sol_received: exit?.solReceived ?? null,
       exit_completed_at: exit?.completedAt?.toISOString() ?? null,
@@ -251,8 +231,12 @@ async function main(): Promise<void> {
         "Options:",
         "  --since <Nh>  Lookback window in hours based on trade creation time (default: 72h)",
         "",
-        "Reconciles confirmed live buy trades with journal and exit records.",
+        "Reconciles confirmed live buy trades with exit records.",
         "Never invokes quote, sign, submit, or sell executor paths.",
+        "",
+        "Fields:",
+        "  flow_registered    true once Flow has sent an exit signal for this position",
+        "  flow_position_id   Flow-assigned UUID; only present after exit signal arrives",
       ].join("\n"),
     );
     return;

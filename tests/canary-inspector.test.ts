@@ -190,7 +190,9 @@ describe("position inspector", () => {
     expect(pos.intervention_flag).toBe(false);
     expect(pos.trade_id).toBe(tradeId);
     expect(pos.signal_id).toBe(signalId);
-    expect(pos.position_id).toBeNull(); // no exit signal yet
+    // Open positions have no flow_position_id yet — Flow assigns it when triggering exit
+    expect(pos.flow_position_id).toBeNull();
+    expect(pos.flow_registered).toBe(false);
     expect(pos.entry_sol_cost).toBe(0.001);
     expect(pos.entry_quantity_raw).toBe("123456");
     expect(pos.idempotency_key).toBe(`position:trade:${tradeId}:signal:${signalId}`);
@@ -217,7 +219,8 @@ describe("position inspector", () => {
     const result = await buildExport(72);
     const pos = result.positions[0]!;
     expect(pos.lifecycle_state).toBe("closed");
-    expect(pos.position_id).toBe(positionId);
+    expect(pos.flow_position_id).toBe(positionId);
+    expect(pos.flow_registered).toBe(true);
     expect(pos.exit_signature).toBe("exit-sig-abc");
     expect(pos.exit_sol_received).toBe(0.00095);
     expect(pos.intervention_flag).toBe(false);
@@ -237,6 +240,7 @@ describe("position inspector", () => {
 
     const result = await buildExport(72);
     expect(result.positions[0]!.lifecycle_state).toBe("exit_in_progress");
+    expect(result.positions[0]!.flow_registered).toBe(true);
     expect(result.positions[0]!.intervention_flag).toBe(false);
   });
 
@@ -254,6 +258,7 @@ describe("position inspector", () => {
 
     const result = await buildExport(72);
     expect(result.positions[0]!.lifecycle_state).toBe("exit_in_progress");
+    expect(result.positions[0]!.flow_registered).toBe(true);
   });
 
   it("flags intervention_needed for sell_failed", async () => {
@@ -294,18 +299,19 @@ describe("position inspector", () => {
     expect(pos.intervention_reason).toContain("buy_unconfirmed");
   });
 
-  it("surfaces journal_id when an ExecutionJournal row is linked to the trade", async () => {
+  it("falls back to signal_id join when tradeId is null on exit row", async () => {
     vi.resetModules();
     setEnv(dbPath);
     const sqlite = new Database(dbPath);
-    const { tradeId } = insertSignalAndTrade(sqlite);
-    const journalId = `journal-${Math.random().toString(36).slice(2)}`;
-    sqlite.prepare(`
-      INSERT INTO execution_journal (
-        journal_id, idempotency_key, raw_payload_json, state, outcome,
-        trade_id, created_at, updated_at
-      ) VALUES (?, ?, '{}', 'done', 'live_executed', ?, ?, ?)
-    `).run(journalId, `ik-${journalId}`, tradeId, NOW_ISO, NOW_ISO);
+    const { signalId, tradeId } = insertSignalAndTrade(sqlite);
+    // Insert exit row with no tradeId — simulates pre-backfill state
+    const positionId = insertExitRow(sqlite, {
+      tradeId: null,
+      signalId,
+      state: "closed",
+      signature: "fallback-sig",
+      solReceived: 0.0009,
+    });
     sqlite.close();
 
     const { connectDb } = await import("../src/db/index.js");
@@ -313,7 +319,11 @@ describe("position inspector", () => {
     const { buildExport } = await import("../src/ops/canary-inspector.js");
 
     const result = await buildExport(72);
-    expect(result.positions[0]!.journal_id).toBe(journalId);
+    const pos = result.positions[0]!;
+    expect(pos.lifecycle_state).toBe("closed");
+    expect(pos.flow_position_id).toBe(positionId);
+    expect(pos.trade_id).toBe(tradeId);
+    expect(pos.exit_signature).toBe("fallback-sig");
   });
 
   it("is idempotent: running twice produces identical output", async () => {
@@ -329,7 +339,6 @@ describe("position inspector", () => {
 
     const first = await buildExport(72);
     const second = await buildExport(72);
-    // Same positions, same idempotency keys, same lifecycle states
     expect(second.positions).toHaveLength(first.positions.length);
     expect(second.positions[0]!.idempotency_key).toBe(first.positions[0]!.idempotency_key);
     expect(second.positions[0]!.lifecycle_state).toBe(first.positions[0]!.lifecycle_state);
