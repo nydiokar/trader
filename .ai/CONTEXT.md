@@ -74,7 +74,6 @@ Target production architecture:
 - [x] Latest export: `data/live-readiness-export.json` (16 journals, all blocked by `live_execution_disabled`, 15 also by `signal_stale`, all executor paths `invoked: false`).
 - [x] Bot-owned price/liquidity refresh (currently operator-supplied via CLI flags).
 - [ ] `previously_seen_token` check is structurally inert for batch evaluation — meaningful at single-signal live-promotion time (documented in source).
-- [ ] Telegram alerts for dry-run accepted/rejected/readiness outcomes.
 
 **Stage 7: Done** — live buying is active at tiny capital via Flow → `/signal`.
 
