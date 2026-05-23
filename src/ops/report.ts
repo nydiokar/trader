@@ -16,6 +16,39 @@ interface Stats {
   worstSol: number | null;
 }
 
+interface CountRow {
+  key: string | null;
+  count: bigint | number;
+}
+
+interface OperationalStats {
+  signals: {
+    total: number;
+    done: number;
+    failed: number;
+    rejected: number;
+  };
+  buys: {
+    total: number;
+    confirmed: number;
+    failed: number;
+    submitted: number;
+    submittedConfirmed: number;
+    multiAttempt: number;
+    recoveredAfterFailure: number;
+    multiAttemptNeverSucceeded: number;
+  };
+  exits: {
+    total: number;
+    closed: number;
+    failed: number;
+    pending: number;
+  };
+  buyFailureReasons: Array<{ reason: string; count: number }>;
+  intakeFailureReasons: Array<{ reason: string; count: number }>;
+  exitFailureReasons: Array<{ reason: string; count: number }>;
+}
+
 function computeStats(
   rows: Array<{ sizeSol: number | null; solReceived: number | null }>
 ): Stats {
@@ -70,9 +103,15 @@ function line(label: string, value: string): string {
   const inner = W - 2; // space between | |
   const labelPad = 20;
   const valuePad = inner - labelPad - 2; // 2 for spaces around |
-  const l = label.padEnd(labelPad);
-  const v = value.padStart(valuePad);
+  const l = fit(label, labelPad).padEnd(labelPad);
+  const v = fit(value, valuePad).padStart(valuePad);
   return `| ${l} | ${v} |`;
+}
+
+function fit(value: string, width: number): string {
+  if (value.length <= width) return value;
+  if (width <= 1) return value.slice(0, width);
+  return `${value.slice(0, width - 1)}…`;
 }
 
 function divider(title: string): string {
@@ -123,6 +162,47 @@ function fmtPf(v: number | null): string {
   return `${v.toFixed(2)}x`;
 }
 
+function fmtCountPct(count: number, total: number): string {
+  if (total === 0) return "0 / 0";
+  return `${count} / ${total} (${((count / total) * 100).toFixed(1)} %)`;
+}
+
+function normalizeCount(value: bigint | number): number {
+  return typeof value === "bigint" ? Number(value) : value;
+}
+
+function normalizeReason(value: string | null | undefined): string {
+  if (!value) return "unknown";
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return "unknown";
+  return trimmed;
+}
+
+function parseAttempts(resultJson: string | null): Array<{ state?: string; decision?: string }> {
+  if (!resultJson) return [];
+  try {
+    const parsed = JSON.parse(resultJson) as { attempts?: unknown };
+    if (!Array.isArray(parsed.attempts)) return [];
+    return parsed.attempts.filter((attempt): attempt is { state?: string; decision?: string } => (
+      typeof attempt === "object" && attempt !== null
+    ));
+  } catch {
+    return [];
+  }
+}
+
+function renderReasons(title: string, reasons: Array<{ reason: string; count: number }>): string[] {
+  const lines = [divider(title)];
+  if (reasons.length === 0) {
+    lines.push(line("No failures", "-"));
+    return lines;
+  }
+  for (const reason of reasons.slice(0, 6)) {
+    lines.push(line(reason.reason, String(reason.count)));
+  }
+  return lines;
+}
+
 function renderSection(title: string, stats: Stats): string[] {
   const lines: string[] = [];
   lines.push(divider(title));
@@ -142,6 +222,27 @@ function renderSection(title: string, stats: Stats): string[] {
     lines.push(line("Worst trade", fmtPnl(stats.worstSol ?? 0)));
     lines.push(line("Avg trade", fmtPnl(stats.avgPnlSol ?? 0)));
   }
+  return lines;
+}
+
+function renderOperationalSection(stats: OperationalStats): string[] {
+  const lines: string[] = [];
+  lines.push(divider("OPERATIONAL SUCCESS"));
+  lines.push(line("Signals done", fmtCountPct(stats.signals.done, stats.signals.total)));
+  lines.push(line("Signals failed", fmtCountPct(stats.signals.failed, stats.signals.total)));
+  lines.push(line("Signals rejected", fmtCountPct(stats.signals.rejected, stats.signals.total)));
+  lines.push(line("Buys confirmed", fmtCountPct(stats.buys.confirmed, stats.buys.total)));
+  lines.push(line("Buys failed", fmtCountPct(stats.buys.failed, stats.buys.total)));
+  lines.push(line("Submitted landed", fmtCountPct(stats.buys.submittedConfirmed, stats.buys.submitted)));
+  lines.push(line("Retried buys", fmtCountPct(stats.buys.multiAttempt, stats.buys.total)));
+  lines.push(line("Failed then succeeded", fmtCountPct(stats.buys.recoveredAfterFailure, stats.buys.multiAttempt)));
+  lines.push(line("Retried never succeeded", fmtCountPct(stats.buys.multiAttemptNeverSucceeded, stats.buys.multiAttempt)));
+  lines.push(line("Exits closed", fmtCountPct(stats.exits.closed, stats.exits.total)));
+  lines.push(line("Exits failed", fmtCountPct(stats.exits.failed, stats.exits.total)));
+  lines.push(line("Exits pending", fmtCountPct(stats.exits.pending, stats.exits.total)));
+  lines.push(...renderReasons("BUY FAILURE REASONS", stats.buyFailureReasons));
+  lines.push(...renderReasons("INTAKE FAILURE REASONS", stats.intakeFailureReasons));
+  lines.push(...renderReasons("EXIT FAILURE REASONS", stats.exitFailureReasons));
   return lines;
 }
 
@@ -169,6 +270,128 @@ async function fetchClosed(since: Date | null) {
   });
 }
 
+async function fetchOperationalStats(since: Date | null): Promise<OperationalStats> {
+  const sinceSeconds = since ? Math.floor(since.getTime() / 1000) : null;
+  const signalWhere = sinceSeconds ? { receivedAt: { gte: sinceSeconds } } : {};
+  const tradeWhere = sinceSeconds ? { createdAt: { gte: sinceSeconds } } : {};
+  const exitWhere = since ? { dryRun: false, createdAt: { gte: since } } : { dryRun: false };
+
+  const buyReasonRowsPromise = sinceSeconds
+    ? db.$queryRaw<CountRow[]>`
+        SELECT COALESCE(error_msg, state) AS key, COUNT(*) AS count
+        FROM trades
+        WHERE state != 'confirmed'
+          AND created_at >= ${sinceSeconds}
+        GROUP BY COALESCE(error_msg, state)
+        ORDER BY count DESC
+      `
+    : db.$queryRaw<CountRow[]>`
+        SELECT COALESCE(error_msg, state) AS key, COUNT(*) AS count
+        FROM trades
+        WHERE state != 'confirmed'
+        GROUP BY COALESCE(error_msg, state)
+        ORDER BY count DESC
+      `;
+
+  const intakeReasonRowsPromise = sinceSeconds
+    ? db.$queryRaw<CountRow[]>`
+        SELECT COALESCE(decision, state) AS key, COUNT(*) AS count
+        FROM signals
+        WHERE state IN ('failed', 'rejected')
+          AND received_at >= ${sinceSeconds}
+        GROUP BY COALESCE(decision, state)
+        ORDER BY count DESC
+      `
+    : db.$queryRaw<CountRow[]>`
+        SELECT COALESCE(decision, state) AS key, COUNT(*) AS count
+        FROM signals
+        WHERE state IN ('failed', 'rejected')
+        GROUP BY COALESCE(decision, state)
+        ORDER BY count DESC
+      `;
+
+  const exitReasonRowsPromise = since
+    ? db.$queryRaw<CountRow[]>`
+        SELECT COALESCE(error_reason, error_message, state) AS key, COUNT(*) AS count
+        FROM flow_exit_execution
+        WHERE dry_run = 0
+          AND state NOT IN ('closed')
+          AND (
+            CAST(strftime('%s', REPLACE(created_at, '+00:00', 'Z')) AS INTEGER) * 1000 >= ${since.getTime()}
+          )
+        GROUP BY COALESCE(error_reason, error_message, state)
+        ORDER BY count DESC
+      `
+    : db.$queryRaw<CountRow[]>`
+        SELECT COALESCE(error_reason, error_message, state) AS key, COUNT(*) AS count
+        FROM flow_exit_execution
+        WHERE dry_run = 0 AND state NOT IN ('closed')
+        GROUP BY COALESCE(error_reason, error_message, state)
+        ORDER BY count DESC
+      `;
+
+  const [signals, trades, exits, buyReasonRows, intakeReasonRows, exitReasonRows] = await Promise.all([
+    db.signal.findMany({ where: signalWhere, select: { state: true, resultJson: true } }),
+    db.trade.findMany({ where: tradeWhere, select: { state: true } }),
+    db.flowExitExecution.findMany({ where: exitWhere, select: { state: true } }),
+    buyReasonRowsPromise,
+    intakeReasonRowsPromise,
+    exitReasonRowsPromise,
+  ]);
+
+  const signalCounts = {
+    total: signals.length,
+    done: signals.filter((row) => row.state === "done").length,
+    failed: signals.filter((row) => row.state === "failed").length,
+    rejected: signals.filter((row) => row.state === "rejected").length,
+  };
+
+  const submittedTrades = trades.filter((row) => row.state !== "pre_submit_failed");
+  const confirmedTrades = trades.filter((row) => row.state === "confirmed");
+  const multiAttemptSignals = signals
+    .map((row) => parseAttempts(row.resultJson))
+    .filter((attempts) => attempts.length > 1);
+  const recoveredAfterFailure = multiAttemptSignals.filter((attempts) => {
+    const finalAttempt = attempts[attempts.length - 1];
+    return finalAttempt?.state === "done" && attempts.slice(0, -1).some((attempt) => attempt.state === "failed");
+  }).length;
+  const multiAttemptNeverSucceeded = multiAttemptSignals.filter((attempts) => (
+    !attempts.some((attempt) => attempt.state === "done")
+  )).length;
+
+  return {
+    signals: signalCounts,
+    buys: {
+      total: trades.length,
+      confirmed: confirmedTrades.length,
+      failed: trades.length - confirmedTrades.length,
+      submitted: submittedTrades.length,
+      submittedConfirmed: submittedTrades.filter((row) => row.state === "confirmed").length,
+      multiAttempt: multiAttemptSignals.length,
+      recoveredAfterFailure,
+      multiAttemptNeverSucceeded,
+    },
+    exits: {
+      total: exits.length,
+      closed: exits.filter((row) => row.state === "closed").length,
+      failed: exits.filter((row) => row.state.includes("failed")).length,
+      pending: exits.filter((row) => row.state !== "closed" && !row.state.includes("failed")).length,
+    },
+    buyFailureReasons: buyReasonRows.map((row) => ({
+      reason: normalizeReason(row.key),
+      count: normalizeCount(row.count),
+    })),
+    intakeFailureReasons: intakeReasonRows.map((row) => ({
+      reason: normalizeReason(row.key),
+      count: normalizeCount(row.count),
+    })),
+    exitFailureReasons: exitReasonRows.map((row) => ({
+      reason: normalizeReason(row.key),
+      count: normalizeCount(row.count),
+    })),
+  };
+}
+
 // ── main ──────────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
@@ -176,11 +399,14 @@ async function main(): Promise<void> {
     const now = new Date();
     const oneHourAgo = new Date(now.getTime() - 3_600_000);
     const twentyFourHoursAgo = new Date(now.getTime() - 86_400_000);
+    const fortyEightHoursAgo = new Date(now.getTime() - 172_800_000);
 
-    const [allRows, last24hRows, lastHourRows] = await Promise.all([
+    const [allRows, last24hRows, lastHourRows, operationalStats, last48hOperationalStats] = await Promise.all([
       fetchClosed(null),
       fetchClosed(twentyFourHoursAgo),
       fetchClosed(oneHourAgo),
+      fetchOperationalStats(null),
+      fetchOperationalStats(fortyEightHoursAgo),
     ]);
 
     const sessionStats = computeStats(allRows);
@@ -193,6 +419,10 @@ async function main(): Promise<void> {
     out.push(top());
     out.push(header("PERFORMANCE REPORT", ts));
     out.push(mid());
+    out.push(...renderOperationalSection(operationalStats));
+    out.push(...renderOperationalSection(last48hOperationalStats).map((row) => (
+      row === divider("OPERATIONAL SUCCESS") ? divider("OPERATIONAL LAST 48H") : row
+    )));
     out.push(...renderSection("SESSION (ALL TIME)", sessionStats));
     out.push(...renderSection("LAST 24 HOURS", last24hStats));
     out.push(...renderSection("LAST HOUR", lastHourStats));
