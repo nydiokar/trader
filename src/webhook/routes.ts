@@ -36,7 +36,7 @@ import { SignalPayload, type IntelligenceDecisionType, type SignalPayloadType } 
 
 // Explicitly supported exit policies — reject anything not in this list.
 // Adding a new policy here is a deliberate act; silent fallback is not allowed.
-const KNOWN_EXIT_POLICIES = new Set(["core_6buy_abandon15_v0"]);
+const KNOWN_EXIT_POLICIES = new Set(["core_6buy_abandon15_v0", "trail_60_probe_add"]);
 
 // Hard risk note patterns that block paid trades regardless of other signals.
 // CONTRACT: tokens_ingest must use these exact prefixes for blocking notes and must NOT
@@ -124,6 +124,8 @@ type SignalProcessor = (payload: {
   planned_exit_policy_label?: string;
   client_timestamp?: number;
   intelligence_decision?: IntelligenceDecisionType;
+  signal_kind?: "probe" | "add";
+  parent_signal_id?: string;
 }) => Promise<{
   state: "done" | "failed" | "rejected";
   decision: string;
@@ -135,6 +137,7 @@ type BlockerCheck = (
   signalId: string,
   tokenMint: string,
   amountSol: number,
+  opts?: { skipCooldown?: boolean },
 ) => Promise<{ blocked: false } | { blocked: true; reason: string }>;
 type TripwireCheck = (
   tokenMint: string,
@@ -272,9 +275,49 @@ export async function registerRoutes(
       // ── Intelligence gate ──────────────────────────────────────────────────
       // When intelligence_decision is present, it is the source of truth.
       // Legacy mode (no intelligence_decision) is only allowed when explicitly enabled.
+      // Add signals (probe-and-add confirmation leg) bypass the intelligence gate —
+      // they were authorised at probe time and have no intelligence_decision of their own.
       let executionPayload: Parameters<SignalProcessor>[0];
+      const isAddSignal = (payload as { signal_kind?: string }).signal_kind === "add";
 
-      if (payload.intelligence_decision) {
+      if (isAddSignal) {
+        // Validate the add signal has a parent_signal_id reference.
+        const parentId = (payload as { parent_signal_id?: string }).parent_signal_id;
+        if (!parentId) {
+          rejections.inc({ reason: "add_signal_missing_parent" });
+          const rejectionResponse = { status: "rejected", decision: "add_signal_missing_parent", signal_id: payload.signal_id };
+          completeSignal(payload.signal_id, "rejected", "add_signal_missing_parent", rejectionResponse, Math.floor(Date.now() / 1000));
+          return reply.code(200).send(rejectionResponse);
+        }
+
+        if (!payload.entry_price_usd) {
+          rejections.inc({ reason: "missing_entry_price_usd" });
+          const rejectionResponse = { status: "rejected", decision: "missing_entry_price_usd", signal_id: payload.signal_id };
+          completeSignal(payload.signal_id, "rejected", "missing_entry_price_usd", rejectionResponse, Math.floor(Date.now() / 1000));
+          return reply.code(200).send(rejectionResponse);
+        }
+
+        if (payload.amount_sol <= 0) {
+          rejections.inc({ reason: "amount_sol_zero" });
+          const rejectionResponse = { status: "rejected", decision: "amount_sol_zero", signal_id: payload.signal_id };
+          completeSignal(payload.signal_id, "rejected", "amount_sol_zero", rejectionResponse, Math.floor(Date.now() / 1000));
+          return reply.code(200).send(rejectionResponse);
+        }
+
+        const addSol = Math.min(payload.amount_sol, config.TRADER_MAX_STAKE_SOL);
+        const addSlippage = payload.max_slippage_bps ?? 300;
+        executionPayload = {
+          ...payload,
+          amount_sol: addSol,
+          max_slippage_bps: addSlippage,
+          planned_exit_policy_label: payload.planned_exit_policy_label ?? "trail_60_probe_add",
+          signal_kind: "add",
+          parent_signal_id: parentId,
+        };
+
+        finalAmountSolHistogram.observe(addSol);
+        logger.info({ signal_id: payload.signal_id, parent_signal_id: parentId, amount_sol: addSol }, "add signal gate passed");
+      } else if (payload.intelligence_decision) {
         const gate = runIntelligenceGate(payload, settings);
 
         if (!gate.ok) {
@@ -369,6 +412,7 @@ export async function registerRoutes(
         executionPayload.signal_id,
         executionPayload.token_mint,
         executionPayload.amount_sol,
+        { skipCooldown: isAddSignal },
       );
 
       if (blocker.blocked) {
@@ -615,6 +659,10 @@ async function executeSignalWithRuntimeRetries(
             entryPriceUsd: payload.entry_price_usd,
             entryLiquidityUsd: payload.entry_liquidity_usd ?? null,
             policyLabel: payload.planned_exit_policy_label,
+            signalKind: (payload as { signal_kind?: "probe" | "add" }).signal_kind ?? "probe",
+            ...(((payload as { parent_signal_id?: string }).parent_signal_id))
+              ? { parentSignalId: (payload as { parent_signal_id?: string }).parent_signal_id }
+              : {},
           }
         : undefined,
     );

@@ -195,6 +195,8 @@ type PositionFeedbackInput = {
   entryPriceUsd: number;
   entryLiquidityUsd?: number | null;
   policyLabel: string;
+  signalKind?: "probe" | "add";
+  parentSignalId?: string;
 };
 
 function defaultDependencies(): Promise<ExecutorDependencies> {
@@ -622,6 +624,8 @@ async function registerOpenPositionAfterBuy(input: {
         token_amount_raw: reconciliation.amountOutRaw.toString(),
         token_decimals: reconciliation.tokenDecimals,
         policy_label: input.positionFeedback.policyLabel,
+        signal_kind: input.positionFeedback.signalKind ?? "probe",
+        ...(input.positionFeedback.parentSignalId ? { parent_signal_id: input.positionFeedback.parentSignalId } : {}),
       }),
     });
 

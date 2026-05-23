@@ -36,14 +36,16 @@ export async function runBlockers(
   _signalId: string,
   tokenMint: string,
   amountSol: number,
+  opts?: { skipCooldown?: boolean },
 ): Promise<BlockerResult> {
-  return runBlockersWithDependencies(tokenMint, amountSol, await defaultDependencies());
+  return runBlockersWithDependencies(tokenMint, amountSol, await defaultDependencies(), opts);
 }
 
 export async function runBlockersWithDependencies(
   tokenMint: string,
   amountSol: number,
   deps: BlockerDependencies,
+  opts?: { skipCooldown?: boolean },
 ): Promise<BlockerResult> {
   if (deps.config.KILL_SWITCH || (await deps.getDbKillSwitch())) {
     killSwitchGauge.set(1);
@@ -78,15 +80,17 @@ export async function runBlockersWithDependencies(
     }
   }
 
-  const lastTradeCreatedAt = await deps.getLastTradeCreatedAt(tokenMint);
-  const cooldownSeconds =
-    deps.config.TOKEN_COOLDOWN_SECONDS ??
-    (deps.config.PER_TOKEN_COOLDOWN_MINUTES ?? 0) * 60;
-  if (
-    lastTradeCreatedAt !== null &&
-    Math.floor(deps.now() / 1000) - lastTradeCreatedAt < cooldownSeconds
-  ) {
-    return { blocked: true, reason: "cooldown" };
+  if (!opts?.skipCooldown) {
+    const lastTradeCreatedAt = await deps.getLastTradeCreatedAt(tokenMint);
+    const cooldownSeconds =
+      deps.config.TOKEN_COOLDOWN_SECONDS ??
+      (deps.config.PER_TOKEN_COOLDOWN_MINUTES ?? 0) * 60;
+    if (
+      lastTradeCreatedAt !== null &&
+      Math.floor(deps.now() / 1000) - lastTradeCreatedAt < cooldownSeconds
+    ) {
+      return { blocked: true, reason: "cooldown" };
+    }
   }
 
   if (await deps.isBlocklisted(tokenMint)) {

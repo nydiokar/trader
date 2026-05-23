@@ -35,6 +35,9 @@ export const LegacySignalPayload = z.object({
   entry_liquidity_usd: z.number().nonnegative().optional().nullable(),
   planned_exit_policy_label: z.string().min(1).optional(),
   intelligence_decision: IntelligenceDecision.optional(),
+  // Probe-and-add contract fields. signal_kind defaults to 'probe' for backwards compat.
+  signal_kind: z.enum(["probe", "add"]).optional().default("probe"),
+  parent_signal_id: z.string().optional(),
 });
 
 export const ContractDecisionPayload = z.object({
@@ -72,6 +75,8 @@ export const ContractOrderRequestSignalPayload = z.object({
   planned_exit_policy_label: z.string().min(1).optional(),
   decision: ContractDecisionPayload.optional(),
   intelligence_decision: IntelligenceDecision.optional(),
+  signal_kind: z.enum(["probe", "add"]).optional().default("probe"),
+  parent_signal_id: z.string().optional(),
 }).transform((payload) => {
   const intelligenceDecision = payload.intelligence_decision ?? (
     payload.decision
@@ -104,6 +109,8 @@ export const ContractOrderRequestSignalPayload = z.object({
     entry_liquidity_usd: payload.entry_liquidity_usd,
     planned_exit_policy_label: payload.planned_exit_policy_label,
     intelligence_decision: intelligenceDecision,
+    signal_kind: payload.signal_kind,
+    parent_signal_id: payload.parent_signal_id,
   };
 });
 
