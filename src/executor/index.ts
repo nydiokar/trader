@@ -38,7 +38,7 @@ import {
   HeliusSenderSyncError,
   type HeliusSenderClient,
 } from "./helius-sender.js";
-import { getQuote, getQuoteForSwap, getSwap, JupiterApiError, WSOL_MINT } from "./jupiter.js";
+import { getQuote, getQuoteForSwap, getSwap, JupiterApiError, parseSimulationCustomErrorCode, WSOL_MINT } from "./jupiter.js";
 import { getPriorityFeeEstimate } from "./priority_fee.js";
 import {
   notify,
@@ -378,9 +378,18 @@ export async function executeTokenSellWithDependencies(
   } catch (error) {
     const outcome: Extract<ExecutionOutcome, "pre_submit_failed" | "uncertain"> =
       signature && submissionAttempted ? "uncertain" : "pre_submit_failed";
-    const errorKind = error instanceof JupiterApiError ? error.kind : undefined;
+    const jupErr = error instanceof JupiterApiError ? error : undefined;
+    const errorKind = jupErr?.kind;
+    const simErrorCode = jupErr?.simulationErrorCode;
+    const simErrorLabel = jupErr?.simulationErrorLabel;
     logger.error(
-      { err: error, exit_id: input.exitId, signature: signature?.toString(), error_kind: errorKind },
+      {
+        err: error,
+        exit_id: input.exitId,
+        signature: signature?.toString(),
+        error_kind: errorKind,
+        ...(simErrorCode !== undefined ? { simulation_error_code: simErrorCode, simulation_error_label: simErrorLabel } : {}),
+      },
       submissionAttempted
         ? "exit sell failed after submission"
         : "exit sell failed before submission",
@@ -392,6 +401,7 @@ export async function executeTokenSellWithDependencies(
         error: outcome,
         exit_id: input.exitId,
         ...(errorKind !== undefined ? { error_kind: errorKind } : {}),
+        ...(simErrorCode !== undefined ? { simulation_error_code: simErrorCode, simulation_error_label: simErrorLabel } : {}),
         ...(submissionAttempted && signature ? { signature: signature.toString() } : {}),
       },
     };
@@ -831,10 +841,9 @@ export async function deserializeAndSign(
   // Simulate with replaceRecentBlockhash so stale blockhashes don't cause false failures.
   const simulation = await connection.simulateTransaction(signedBase64);
   if (simulation.err) {
-    throw new JupiterApiError(
-      "simulation_failed",
-      `swap simulation failed: ${JSON.stringify(simulation.err, (_k, v) => (typeof v === "bigint" ? v.toString() : v))}`,
-    );
+    const simErrJson = JSON.stringify(simulation.err, (_k, v) => (typeof v === "bigint" ? v.toString() : v));
+    const simErrorCode = parseSimulationCustomErrorCode(simulation.err);
+    throw new JupiterApiError("simulation_failed", `swap simulation failed: ${simErrJson}`, undefined, simErrorCode);
   }
 
   return { transaction };

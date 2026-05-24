@@ -353,11 +353,14 @@ async function executeTokenSellWithRuntimeRetries(input: {
 
     const errorKind = result.response.error_kind;
     prevErrorKind = errorKind;
+    // simulation_failed is always unrecoverable — the chain rejected the tx for a
+    // structural reason (empty account, program error, etc.) that retrying won't fix.
     const retryablePreSubmit =
       result.state === "failed" &&
       result.decision === "pre_submit_failed" &&
       !result.response.signature &&
-      errorKind !== "no_route";
+      errorKind !== "no_route" &&
+      errorKind !== "simulation_failed";
 
     if (!retryablePreSubmit) {
       break;

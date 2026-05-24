@@ -672,13 +672,14 @@ async function executeSignalWithRuntimeRetries(
     const errorKind = typeof response["error_kind"] === "string" ? response["error_kind"] : undefined;
     prevErrorKind = errorKind;
 
-    // no_route and tx_too_large are permanent — retrying with same params won't help
+    // no_route, tx_too_large, and simulation_failed are permanent — retrying won't help
     const retryablePreSubmit =
       result.state === "failed" &&
       result.decision === "pre_submit_failed" &&
       typeof response["signature"] !== "string" &&
       errorKind !== "no_route" &&
-      errorKind !== "tx_too_large";
+      errorKind !== "tx_too_large" &&
+      errorKind !== "simulation_failed";
 
     // only step up slippage when the failure was specifically a price impact rejection
     if (retryablePreSubmit && errorKind === "invalid_quote") {

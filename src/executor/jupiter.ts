@@ -8,15 +8,43 @@ import { quoteLatencySeconds } from "../metrics/registry.js";
 
 export const WSOL_MINT = "So11111111111111111111111111111111111111112";
 
+// Known Solana/program custom error codes seen in simulation failures.
+// These are program-specific — code 6024 is from the SPL Token program (InsufficientFunds).
+const KNOWN_SIMULATION_ERROR_CODES: Record<number, string> = {
+  6024: "insufficient_funds",
+};
+
 export class JupiterApiError extends Error {
   constructor(
     readonly kind: "invalid_quote" | "no_route" | "rate_limited" | "timeout" | "upstream" | "tx_too_large" | "simulation_failed",
     message: string,
     readonly statusCode?: number,
+    readonly simulationErrorCode?: number,
   ) {
     super(message);
     this.name = "JupiterApiError";
   }
+
+  get simulationErrorLabel(): string | undefined {
+    if (this.simulationErrorCode === undefined) return undefined;
+    return KNOWN_SIMULATION_ERROR_CODES[this.simulationErrorCode] ?? `custom_${this.simulationErrorCode}`;
+  }
+}
+
+export function parseSimulationCustomErrorCode(err: unknown): number | undefined {
+  if (typeof err !== "object" || err === null) return undefined;
+  // Shape: { InstructionError: [index, { Custom: number }] }
+  const instrErr = (err as Record<string, unknown>)["InstructionError"];
+  if (!Array.isArray(instrErr) || instrErr.length < 2) return undefined;
+  const detail = instrErr[1];
+  if (typeof detail !== "object" || detail === null) return undefined;
+  const code = (detail as Record<string, unknown>)["Custom"];
+  if (typeof code === "number") return code;
+  if (typeof code === "string") {
+    const parsed = parseInt(code, 10);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+  return undefined;
 }
 
 // Middleware that captures the parsed error body from non-OK responses before the SDK
