@@ -29,7 +29,7 @@ function sign(secret: string, timestamp: number, body: string): string {
 const validIntelligenceDecision = {
   action: "probe",
   lane: "core_ev",
-  confidence: 0.82,
+  confidence: "0.82",
   vector_hits: ["6_buy_signal", "low_holder_concentration"],
   risk_notes: [],
   amount_sol: 0.005,

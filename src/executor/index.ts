@@ -38,7 +38,7 @@ import {
   HeliusSenderSyncError,
   type HeliusSenderClient,
 } from "./helius-sender.js";
-import { getQuote, getQuoteForSwap, getSwap, JupiterApiError, parseSimulationCustomErrorCode, WSOL_MINT } from "./jupiter.js";
+import { getQuote, getQuoteForSwap, getSwap, JupiterApiError, parseSimulationError, WSOL_MINT } from "./jupiter.js";
 import { getPriorityFeeEstimate } from "./priority_fee.js";
 import {
   notify,
@@ -380,15 +380,16 @@ export async function executeTokenSellWithDependencies(
       signature && submissionAttempted ? "uncertain" : "pre_submit_failed";
     const jupErr = error instanceof JupiterApiError ? error : undefined;
     const errorKind = jupErr?.kind;
-    const simErrorCode = jupErr?.simulationErrorCode;
-    const simErrorLabel = jupErr?.simulationErrorLabel;
+    const simCustomCode = jupErr?.simulationCustomCode;
+    const simNonCustom = jupErr?.simulationNonCustomError;
     logger.error(
       {
         err: error,
         exit_id: input.exitId,
         signature: signature?.toString(),
         error_kind: errorKind,
-        ...(simErrorCode !== undefined ? { simulation_error_code: simErrorCode, simulation_error_label: simErrorLabel } : {}),
+        ...(simCustomCode !== undefined ? { simulation_custom_code: simCustomCode } : {}),
+        ...(simNonCustom !== undefined ? { simulation_error: simNonCustom } : {}),
       },
       submissionAttempted
         ? "exit sell failed after submission"
@@ -401,7 +402,8 @@ export async function executeTokenSellWithDependencies(
         error: outcome,
         exit_id: input.exitId,
         ...(errorKind !== undefined ? { error_kind: errorKind } : {}),
-        ...(simErrorCode !== undefined ? { simulation_error_code: simErrorCode, simulation_error_label: simErrorLabel } : {}),
+        ...(simCustomCode !== undefined ? { simulation_custom_code: simCustomCode } : {}),
+        ...(simNonCustom !== undefined ? { simulation_error: simNonCustom } : {}),
         ...(submissionAttempted && signature ? { signature: signature.toString() } : {}),
       },
     };
@@ -842,8 +844,15 @@ export async function deserializeAndSign(
   const simulation = await connection.simulateTransaction(signedBase64);
   if (simulation.err) {
     const simErrJson = JSON.stringify(simulation.err, (_k, v) => (typeof v === "bigint" ? v.toString() : v));
-    const simErrorCode = parseSimulationCustomErrorCode(simulation.err);
-    throw new JupiterApiError("simulation_failed", `swap simulation failed: ${simErrJson}`, undefined, simErrorCode);
+    const parsed = parseSimulationError(simulation.err);
+    throw new JupiterApiError(
+      "simulation_failed",
+      `swap simulation failed: ${simErrJson}`,
+      undefined,
+      parsed.kind === "custom" ? parsed.code : undefined,
+      undefined,
+      parsed.kind === "non_custom" ? parsed.name : undefined,
+    );
   }
 
   return { transaction };

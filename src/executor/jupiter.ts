@@ -5,46 +5,55 @@ import {
 } from "@jup-ag/api";
 import { config } from "../config.js";
 import { quoteLatencySeconds } from "../metrics/registry.js";
+import { NO_ROUTE_HTTP_CODES } from "./jupiter-errors.js";
 
 export const WSOL_MINT = "So11111111111111111111111111111111111111112";
-
-// Known Solana/program custom error codes seen in simulation failures.
-// These are program-specific — code 6024 is from the SPL Token program (InsufficientFunds).
-const KNOWN_SIMULATION_ERROR_CODES: Record<number, string> = {
-  6024: "insufficient_funds",
-};
 
 export class JupiterApiError extends Error {
   constructor(
     readonly kind: "invalid_quote" | "no_route" | "rate_limited" | "timeout" | "upstream" | "tx_too_large" | "simulation_failed",
     message: string,
     readonly statusCode?: number,
-    readonly simulationErrorCode?: number,
+    // Set when simulation fails with InstructionError[n, {Custom: code}]
+    readonly simulationCustomCode?: number,
+    // The program id that threw the custom code (from instruction index lookup — set externally when known)
+    readonly simulationProgramId?: string,
+    // Set when simulation fails with a non-custom named error (e.g. "InsufficientFundsForRent")
+    readonly simulationNonCustomError?: string,
   ) {
     super(message);
     this.name = "JupiterApiError";
   }
-
-  get simulationErrorLabel(): string | undefined {
-    if (this.simulationErrorCode === undefined) return undefined;
-    return KNOWN_SIMULATION_ERROR_CODES[this.simulationErrorCode] ?? `custom_${this.simulationErrorCode}`;
-  }
 }
 
-export function parseSimulationCustomErrorCode(err: unknown): number | undefined {
-  if (typeof err !== "object" || err === null) return undefined;
-  // Shape: { InstructionError: [index, { Custom: number }] }
-  const instrErr = (err as Record<string, unknown>)["InstructionError"];
-  if (!Array.isArray(instrErr) || instrErr.length < 2) return undefined;
-  const detail = instrErr[1];
-  if (typeof detail !== "object" || detail === null) return undefined;
-  const code = (detail as Record<string, unknown>)["Custom"];
-  if (typeof code === "number") return code;
-  if (typeof code === "string") {
-    const parsed = parseInt(code, 10);
-    return Number.isFinite(parsed) ? parsed : undefined;
+export type ParsedSimulationError =
+  | { kind: "custom"; code: number; programId?: string }
+  | { kind: "non_custom"; name: string }
+  | { kind: "unknown" };
+
+export function parseSimulationError(err: unknown): ParsedSimulationError {
+  if (typeof err === "string") {
+    return { kind: "non_custom", name: err };
   }
-  return undefined;
+  if (typeof err !== "object" || err === null) return { kind: "unknown" };
+
+  const instrErr = (err as Record<string, unknown>)["InstructionError"];
+  if (Array.isArray(instrErr) && instrErr.length >= 2) {
+    const detail = instrErr[1];
+    if (typeof detail === "string") {
+      return { kind: "non_custom", name: detail };
+    }
+    if (typeof detail === "object" && detail !== null) {
+      const code = (detail as Record<string, unknown>)["Custom"];
+      if (typeof code === "number") return { kind: "custom", code };
+      if (typeof code === "string") {
+        const parsed = parseInt(code, 10);
+        if (Number.isFinite(parsed)) return { kind: "custom", code: parsed };
+      }
+    }
+  }
+
+  return { kind: "unknown" };
 }
 
 // Middleware that captures the parsed error body from non-OK responses before the SDK
@@ -181,7 +190,7 @@ function normalizeJupiterError(
 
   if (statusCode === 400) {
     const errorCode = getJupiterErrorCode(error);
-    if (errorCode === "TOKEN_NOT_TRADABLE" || errorCode === "COULD_NOT_FIND_ANY_ROUTE") {
+    if (errorCode && NO_ROUTE_HTTP_CODES.has(errorCode)) {
       return new JupiterApiError("no_route", `Jupiter has no route for this token (${errorCode})`, 400);
     }
   }

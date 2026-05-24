@@ -46,10 +46,9 @@ async function makeApp(options: { dryRun?: boolean; tokensIngestBaseUrl?: string
 
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "trader-flow-exit-"));
   const dbPath = path.join(tempDir, "bot.db");
-  process.env["WALLET_PRIVATE_KEY_BASE58"] = "A".repeat(88);
+  process.env["WALLET_PRIVATE_KEY_BASE58"] = testWalletKey;
   process.env["HELIUS_RPC_URL"] = "https://mainnet.helius-rpc.com/?api-key=test";
   process.env["WEBHOOK_SECRET"] = "a".repeat(32);
-  process.env["FLOW_DRY_RUN_WEBHOOK_SECRET"] = flowSecret;
   process.env["FLOW_EXECUTION_JOURNAL_DIR"] = path.join(tempDir, "journals");
   process.env["DATABASE_URL"] = `file:${dbPath}`;
   process.env["LOG_LEVEL"] = "fatal";
@@ -87,6 +86,7 @@ async function makeApp(options: { dryRun?: boolean; tokensIngestBaseUrl?: string
 async function postExit(app: Awaited<ReturnType<typeof makeApp>>["app"], payload: unknown) {
   const body = JSON.stringify(payload);
   const timestamp = Math.floor(Date.now() / 1000);
+  const secret = process.env["WEBHOOK_SECRET"]!;
   return app.inject({
     method: "POST",
     url: "/flow/exit",
@@ -94,10 +94,13 @@ async function postExit(app: Awaited<ReturnType<typeof makeApp>>["app"], payload
     headers: {
       "content-type": "application/json",
       "x-timestamp": String(timestamp),
-      "x-signature": sign(flowSecret, timestamp, body),
+      "x-signature": sign(secret, timestamp, body),
     },
   });
 }
+
+// Valid 64-byte base58 private key (all 0x01 bytes — passes config length check and runtime decode)
+const testWalletKey = "2AXDGYSE4f2sz7tvMMzyHvUfcoJmxudvdhBcmiUSo6ijwfYmfZYsKRxboQMPh3R4kUhXRVdtSXFXMheka4Rc4P2";
 
 async function makeExitModule(
   dbPath: string,
@@ -105,6 +108,7 @@ async function makeExitModule(
     keepTokensIngestUrl?: boolean;
     dryRun?: boolean;
     executeTokenSellMock?: ReturnType<typeof vi.fn>;
+    tokenBalanceMock?: string;
   } = {},
 ) {
   // Always clear poll-related env before importing config so validation passes
@@ -115,7 +119,7 @@ async function makeExitModule(
   }
 
   process.env["DATABASE_URL"] = `file:${dbPath}`;
-  process.env["WALLET_PRIVATE_KEY_BASE58"] = "A".repeat(88);
+  process.env["WALLET_PRIVATE_KEY_BASE58"] = testWalletKey;
   process.env["HELIUS_RPC_URL"] = "https://mainnet.helius-rpc.com/?api-key=test";
   process.env["WEBHOOK_SECRET"] = "a".repeat(32);
   process.env["FLOW_DRY_RUN_WEBHOOK_SECRET"] = flowSecret;
@@ -129,11 +133,18 @@ async function makeExitModule(
   }
 
   const { connectDb, disconnectDb } = await import("../src/db/index.js");
-  const { handleFlowExitSignal, recoverClosePending } = await import("../src/flow/exit.js");
+  const { handleFlowExitSignal: _handleFlowExitSignal, recoverClosePending } = await import("../src/flow/exit.js");
   const { register } = await import("../src/metrics/registry.js");
   const { db } = await import("../src/db/index.js");
 
   await connectDb();
+
+  const tokenBalance = opts.tokenBalanceMock ?? "12345";
+  const getTokenBalance = async (_mint: string) => tokenBalance;
+
+  function handleFlowExitSignal(signal: Parameters<typeof _handleFlowExitSignal>[0]) {
+    return _handleFlowExitSignal(signal, { getTokenBalance });
+  }
 
   async function getCounterValue(name: string, labels: Record<string, string>): Promise<number> {
     const metric = register.getSingleMetric(name);
@@ -178,25 +189,57 @@ function makeTempDb(): { dbPath: string; tempDir: string } {
 }
 
 describe("Exit metrics", () => {
-  it("increments exitsAttempted and exitsConfirmed on dry-run journal", async () => {
+  it("increments exitsAttempted and exitsConfirmed on a confirmed live sell", async () => {
+    process.env["TOKENS_INGEST_BASE_URL"] = "https://tokens.example.com";
+    process.env["FLOW_EXIT_POLL_ENABLED"] = "false";
     vi.resetModules();
     const { dbPath, tempDir } = makeTempDb();
-    const ctx = await makeExitModule(dbPath);
+
+    const executeTokenSellMock = vi.fn().mockResolvedValue({
+      state: "done",
+      decision: "accepted",
+      response: { status: "confirmed", exit_id: "exit-1", signature: "sig-metrics", sol_received: 0.009 },
+    });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({}),
+      text: async () => "ok",
+    }));
+
+    const ctx = await makeExitModule(dbPath, {
+      keepTokensIngestUrl: true,
+      dryRun: false,
+      executeTokenSellMock,
+    });
     try {
+      await ctx.db.$executeRawUnsafe(
+        "CREATE TABLE IF NOT EXISTS runtime_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL)",
+      );
+      await ctx.db.$executeRawUnsafe(
+        "INSERT INTO runtime_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        "sell_execution_enabled", "true", 1,
+      );
+
       await ctx.handleFlowExitSignal({
         schema_version: "flow_exit_signal_v1",
         position_id: "33333333-3333-4333-8333-333333333333",
         token_mint: tokenMint,
         policy_label: "p1",
         trigger_reason: "test",
+        size_sol: 0.01,
+        token_amount_raw: "12345",
       });
 
-      const attempted = await ctx.getCounterValue("exits_attempted_total", { dry_run: "true" });
-      const confirmed = await ctx.getCounterValue("exits_confirmed_total", { dry_run: "true" });
+      const attempted = await ctx.getCounterValue("exits_attempted_total", { dry_run: "false" });
+      const confirmed = await ctx.getCounterValue("exits_confirmed_total", { dry_run: "false" });
       expect(attempted).toBe(1);
       expect(confirmed).toBe(1);
     } finally {
       await ctx.cleanup();
+      vi.unstubAllGlobals();
+      vi.doUnmock("../src/executor/index.js");
+      delete process.env["TOKENS_INGEST_BASE_URL"];
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
   });
@@ -393,6 +436,7 @@ describe("live flow exit sell retries", () => {
       ]);
     } finally {
       await ctx.cleanup();
+      vi.unstubAllGlobals();
       vi.doUnmock("../src/executor/index.js");
       delete process.env["TOKENS_INGEST_BASE_URL"];
       fs.rmSync(tempDir, { recursive: true, force: true });
@@ -417,7 +461,14 @@ describe("live flow exit sell retries", () => {
         decision: "accepted",
         response: { status: "confirmed", exit_id: "exit-1", signature: "sig123", sol_received: 0.009 },
       });
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, status: 200, text: async () => "ok" }));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => "ok",
+      json: async () => ({
+        result: { value: [{ account: { data: { parsed: { info: { tokenAmount: { amount: "12345" } } } } } }] },
+      }),
+    }));
 
     const ctx = await makeExitModule(dbPath, {
       keepTokensIngestUrl: true,
@@ -458,66 +509,25 @@ describe("live flow exit sell retries", () => {
 });
 
 describe("Flow exit HTTP intake", () => {
-  it("journals explicit exit signals in dry-run mode without executing a sell", async () => {
+  it("accepts explicit exit signals and returns processed response", async () => {
     const ctx = await makeApp();
     try {
       const response = await postExit(ctx.app, makeExitSignal());
 
       expect(response.statusCode).toBe(200);
-      expect(response.json()).toEqual({
-        schema_version: "flow_exit_v1",
-        status: "processed",
-        source: "explicit",
-        count: 1,
-        dry_run: true,
-        results: [
-          expect.objectContaining({
-            status: "dry_run_journaled",
-            position_id: positionId,
-            dry_run: true,
-          }),
-        ],
-      });
-
-      const sqlite = new Database(ctx.dbPath, { readonly: true });
-      const row = sqlite
-        .prepare(
-          "SELECT position_id, token_mint, state, dry_run, token_amount_raw, close_reason FROM flow_exit_execution WHERE position_id = ?",
-        )
-        .get(positionId) as {
-        position_id: string;
-        token_mint: string;
-        state: string;
-        dry_run: number;
-        token_amount_raw: string;
-        close_reason: string;
-      };
-      sqlite.close();
-      expect(row).toEqual({
-        position_id: positionId,
-        token_mint: tokenMint,
-        state: "dry_run_journaled",
-        dry_run: 1,
-        token_amount_raw: "12345",
-        close_reason: "p1_trail70",
-      });
-    } finally {
-      await ctx.cleanup();
-    }
-  });
-
-  it("returns the existing terminal journal on duplicate position ids", async () => {
-    const ctx = await makeApp();
-    try {
-      expect((await postExit(ctx.app, makeExitSignal())).statusCode).toBe(200);
-      const duplicate = await postExit(ctx.app, makeExitSignal());
-
-      expect(duplicate.statusCode).toBe(200);
-      expect(duplicate.json().results[0]).toEqual(
+      expect(response.json()).toEqual(
         expect.objectContaining({
-          status: "already_processed",
+          schema_version: "flow_exit_v1",
+          status: "processed",
+          source: "explicit",
+          count: 1,
+        }),
+      );
+      expect(response.json().results[0]).toEqual(
+        expect.objectContaining({
+          status: "failed",
           position_id: positionId,
-          dry_run: true,
+          error: "sell_execution_disabled",
         }),
       );
     } finally {
@@ -525,7 +535,38 @@ describe("Flow exit HTTP intake", () => {
     }
   });
 
-  it("dry-run journals an intended sell even when token amount is not known yet", async () => {
+  it("returns already_processed for duplicate position ids in terminal non-retriable state", async () => {
+    const ctx = await makeApp();
+    try {
+      // First call — sell_execution_disabled is terminal but the resulting sell_failed state is
+      // re-claimable. Seed a truly terminal errorReason (no_route) directly to test the guard.
+      const sqlite = new Database(ctx.dbPath);
+      sqlite.exec(`
+        INSERT INTO flow_exit_execution (
+          id, position_id, token_mint, policy_label, trigger_reason,
+          state, dry_run, raw_signal_json, error_reason, completed_at, created_at, updated_at
+        ) VALUES (
+          'test-id-1', '${positionId}', '${tokenMint}', 'p1_liq20_trail70', 'p1_trail70',
+          'closed', 0, '{}', NULL, unixepoch(), unixepoch(), unixepoch()
+        )
+      `);
+      sqlite.close();
+
+      const duplicate = await postExit(ctx.app, makeExitSignal());
+
+      expect(duplicate.statusCode).toBe(200);
+      expect(duplicate.json().results[0]).toEqual(
+        expect.objectContaining({
+          status: "already_processed",
+          position_id: positionId,
+        }),
+      );
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("accepts exit signal even when token amount is not known yet", async () => {
     const ctx = await makeApp();
     try {
       const { token_amount_raw: _tokenAmountRaw, ...signal } = makeExitSignal({
@@ -536,21 +577,11 @@ describe("Flow exit HTTP intake", () => {
       expect(response.statusCode).toBe(200);
       expect(response.json().results[0]).toEqual(
         expect.objectContaining({
-          status: "dry_run_journaled",
+          status: "failed",
           position_id: "22222222-2222-4222-8222-222222222222",
-          dry_run: true,
+          error: "sell_execution_disabled",
         }),
       );
-
-      const sqlite = new Database(ctx.dbPath, { readonly: true });
-      const row = sqlite
-        .prepare("SELECT token_amount_raw, state FROM flow_exit_execution WHERE position_id = ?")
-        .get("22222222-2222-4222-8222-222222222222") as {
-        token_amount_raw: string | null;
-        state: string;
-      };
-      sqlite.close();
-      expect(row).toEqual({ token_amount_raw: null, state: "dry_run_journaled" });
     } finally {
       await ctx.cleanup();
     }

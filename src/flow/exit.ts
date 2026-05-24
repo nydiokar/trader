@@ -90,7 +90,19 @@ export async function fetchExitPendingSignals(): Promise<FlowExitSignal[]> {
   return (payload.positions ?? []).map(positionToExitSignal);
 }
 
-export async function handleFlowExitSignal(signal: FlowExitSignal): Promise<FlowExitResult> {
+export async function handleFlowExitSignal(
+  signal: FlowExitSignal,
+  deps: { getTokenBalance?: (tokenMint: string) => Promise<string> } = {},
+): Promise<FlowExitResult> {
+  // Check for already-terminal rows before the sell-enabled guard so duplicates
+  // are rejected even when sell execution is disabled.
+  const existingForDedup = await db.flowExitExecution.findUnique({
+    where: { positionId: signal.position_id },
+  });
+  if (existingForDedup?.state === "closed") {
+    return terminalResult(signal, existingForDedup, "already_processed");
+  }
+
   const settings = await getLiveSettings();
   if (!settings.sellExecutionEnabled) {
     const row = await upsertExitRow(signal, {
@@ -123,7 +135,7 @@ export async function handleFlowExitSignal(signal: FlowExitSignal): Promise<Flow
 
   let liveBalance: string;
   try {
-    liveBalance = await getWalletTokenBalanceRaw(signal.token_mint);
+    liveBalance = await (deps.getTokenBalance ?? getWalletTokenBalanceRaw)(signal.token_mint);
   } catch (err) {
     // RPC failure — release the claim so the next poller tick can retry cleanly
     await db.flowExitExecution.update({
