@@ -17,6 +17,8 @@ function baseDeps(
     lastTradeCreatedAt: number | null;
     blocklisted: boolean;
     walletSol: number;
+    dailyTradeCount: number;
+    dailyNotionalLimitSol: number;
   }>,
 ) {
   return {
@@ -26,12 +28,16 @@ function baseDeps(
       PER_SIGNAL_SOL_CAP: 0.01,
       PER_TOKEN_COOLDOWN_MINUTES: 30,
       WALLET_SOL_FLOOR: 0.75,
+      ...(overrides?.dailyNotionalLimitSol !== undefined
+        ? { DAILY_NOTIONAL_LIMIT_SOL: overrides.dailyNotionalLimitSol }
+        : {}),
+      MAX_TRADES_PER_DAY: 5,
     },
     now: () => now,
     getWalletSol: vi.fn().mockResolvedValue(overrides?.walletSol ?? 0.89),
     getDbKillSwitch: vi.fn().mockResolvedValue(overrides?.dbKillSwitch ?? false),
     getDailySpendSol: vi.fn().mockResolvedValue(overrides?.dailySpendSol ?? 0),
-    getDailyTradeCount: vi.fn().mockResolvedValue(0),
+    getDailyTradeCount: vi.fn().mockResolvedValue(overrides?.dailyTradeCount ?? 0),
     getLastTradeCreatedAt: vi
       .fn()
       .mockResolvedValue(overrides?.lastTradeCreatedAt ?? null),
@@ -89,6 +95,26 @@ describe("risk blockers", () => {
         makeDeps({ dailySpendSol: 0.195 }),
       ),
     ).resolves.toEqual({ blocked: true, reason: "daily_cap" });
+  });
+
+  it("blocks signals that would exceed the trader daily notional limit", async () => {
+    const { runBlockersWithDependencies } = await import("../src/risk/blockers.js");
+
+    await expect(
+      runBlockersWithDependencies(
+        tokenMint,
+        0.01,
+        makeDeps({ dailySpendSol: 0.045, dailyNotionalLimitSol: 0.05 }),
+      ),
+    ).resolves.toEqual({ blocked: true, reason: "daily_notional_limit" });
+  });
+
+  it("blocks when the max trades per day limit is reached", async () => {
+    const { runBlockersWithDependencies } = await import("../src/risk/blockers.js");
+
+    await expect(
+      runBlockersWithDependencies(tokenMint, 0.01, makeDeps({ dailyTradeCount: 5 })),
+    ).resolves.toEqual({ blocked: true, reason: "max_trades_per_day" });
   });
 
   it("blocks tokens inside the cooldown window", async () => {

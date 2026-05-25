@@ -22,6 +22,7 @@ type BlockerDependencies = {
     LIVE_EXECUTION_ENABLED?: boolean;
     REQUIRE_LIVE_EXECUTION_ENABLED?: boolean;
     MAX_TRADES_PER_DAY?: number;
+    DAILY_NOTIONAL_LIMIT_SOL?: number;
   };
   now(): number;
   getWalletSol(): Promise<number>;
@@ -70,6 +71,12 @@ export async function runBlockersWithDependencies(
   dailySpendSol.set(spentToday);
   if (spentToday + amountSol > deps.config.DAILY_SOL_CAP) {
     return { blocked: true, reason: "daily_cap" };
+  }
+  if (
+    deps.config.DAILY_NOTIONAL_LIMIT_SOL !== undefined &&
+    spentToday + amountSol > deps.config.DAILY_NOTIONAL_LIMIT_SOL
+  ) {
+    return { blocked: true, reason: "daily_notional_limit" };
   }
 
   if (deps.config.MAX_TRADES_PER_DAY !== undefined) {
@@ -120,6 +127,7 @@ async function defaultDependencies(): Promise<BlockerDependencies> {
       LIVE_EXECUTION_ENABLED: settings.liveExecutionEnabled,
       REQUIRE_LIVE_EXECUTION_ENABLED: true,
       MAX_TRADES_PER_DAY: config.TRADER_MAX_TRADES_PER_DAY,
+      DAILY_NOTIONAL_LIMIT_SOL: config.TRADER_DAILY_NOTIONAL_LIMIT_SOL,
     },
     now: () => Date.now(),
     async getWalletSol() {
