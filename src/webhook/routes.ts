@@ -36,7 +36,13 @@ import { SignalPayload, type IntelligenceDecisionType, type SignalPayloadType } 
 
 // Explicitly supported exit policies — reject anything not in this list.
 // Adding a new policy here is a deliberate act; silent fallback is not allowed.
-const KNOWN_EXIT_POLICIES = new Set(["core_6buy_abandon15_v0", "trail_60_probe_add"]);
+const KNOWN_EXIT_POLICIES = new Set([
+  "core_6buy_abandon15_v0",
+  "core_6buy_add15_stop15_v1",
+  "trail_60_probe_add",
+  "trail_60_probe_add15_stop15_floor", // legacy label — kept for old open positions
+  "trail_60_probe_add15_stop15",
+]);
 
 // Hard risk note patterns that block paid trades regardless of other signals.
 // CONTRACT: tokens_ingest must use these exact prefixes for blocking notes and must NOT
@@ -75,10 +81,6 @@ function runIntelligenceGate(
   }
 
   const vectorHits = intel.vector_hits ?? [];
-  if (vectorHits.includes("launch_gate_B_reject")) {
-    return { ok: false, reason: "launch_gate_b_reject" };
-  }
-
   const riskNotes = intel.risk_notes ?? [];
   const hardRisk = riskNotes.find((note) => {
     const lower = note.toLowerCase();
