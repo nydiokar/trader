@@ -80,6 +80,17 @@ async function makeApp(options?: {
     tokenMint: string,
     amountSol: number,
   ) => Promise<{ blocked: false } | { blocked: true; reason: string }>;
+  paperQuoteRecorder?: (input: {
+    executionPayload: {
+      signal_id: string;
+      token_mint: string;
+      amount_sol: number;
+      max_slippage_bps: number;
+    };
+    requestedAmountSol: number;
+    liveExecutionAllowed?: boolean;
+    liveBlockReason?: string | null;
+  }) => Promise<{ id: string }>;
 }) {
   vi.resetModules();
 
@@ -115,6 +126,9 @@ async function makeApp(options?: {
       })),
     healthCheck: options?.healthCheck,
     blockerCheck: options?.blockerCheck ?? vi.fn().mockResolvedValue({ blocked: false }),
+    paperQuoteRecorder:
+      options?.paperQuoteRecorder ??
+      vi.fn().mockRejectedValue(new Error("paper quote disabled in webhook tests")),
   });
 
   return {
@@ -155,6 +169,35 @@ describe("M1 webhook ingress", () => {
         status: "queued",
         signal_id: "11111111-1111-4111-8111-111111111111",
       });
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("does not create a paper quote attempt when blockers allow live execution", async () => {
+    const paperQuoteRecorder = vi.fn().mockResolvedValue({ id: "paper-quote-unused" });
+    const ctx = await makeApp({ paperQuoteRecorder });
+    try {
+      const body = JSON.stringify(buildPayload());
+      const timestamp = Math.floor(Date.now() / 1000);
+
+      const response = await ctx.app.inject({
+        method: "POST",
+        url: "/signal",
+        payload: body,
+        headers: {
+          "content-type": "application/json",
+          "x-timestamp": String(timestamp),
+          "x-signature": sign(process.env["WEBHOOK_SECRET"]!, timestamp, body),
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({
+        status: "queued",
+        signal_id: "11111111-1111-4111-8111-111111111111",
+      });
+      expect(paperQuoteRecorder).not.toHaveBeenCalled();
     } finally {
       await ctx.cleanup();
     }
@@ -275,6 +318,56 @@ describe("M1 webhook ingress", () => {
         status: "rejected",
         decision: "per_signal_cap",
         signal_id: "11111111-1111-4111-8111-111111111111",
+      });
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("records a paper quote attempt before returning a blocker rejection", async () => {
+    const processSignal = vi.fn();
+    const paperQuoteRecorder = vi.fn().mockResolvedValue({ id: "paper-quote-1" });
+    const ctx = await makeApp({
+      processSignal,
+      paperQuoteRecorder,
+      blockerCheck: vi.fn().mockResolvedValue({
+        blocked: true,
+        reason: "daily_sol_cap",
+      }),
+    });
+    try {
+      const body = JSON.stringify(buildPayload());
+      const timestamp = Math.floor(Date.now() / 1000);
+
+      const response = await ctx.app.inject({
+        method: "POST",
+        url: "/signal",
+        payload: body,
+        headers: {
+          "content-type": "application/json",
+          "x-timestamp": String(timestamp),
+          "x-signature": sign(process.env["WEBHOOK_SECRET"]!, timestamp, body),
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({
+        status: "rejected",
+        decision: "daily_sol_cap",
+        signal_id: "11111111-1111-4111-8111-111111111111",
+        paper_quote_attempt_id: "paper-quote-1",
+      });
+      expect(processSignal).not.toHaveBeenCalled();
+      expect(paperQuoteRecorder).toHaveBeenCalledWith({
+        executionPayload: expect.objectContaining({
+          signal_id: "11111111-1111-4111-8111-111111111111",
+          token_mint: mint,
+          amount_sol: 0.005,
+          max_slippage_bps: 300,
+        }),
+        requestedAmountSol: 0.005,
+        liveExecutionAllowed: false,
+        liveBlockReason: "daily_sol_cap",
       });
     } finally {
       await ctx.cleanup();

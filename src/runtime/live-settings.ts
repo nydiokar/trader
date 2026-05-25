@@ -182,7 +182,7 @@ const definitions: SettingDefinition[] = [
     type: "integer",
     defaultValue: 5,
     min: 0,
-    max: 100,
+    max: 500,
   },
   {
     key: "signalMaxAgeSeconds",

@@ -111,7 +111,7 @@ async function applyBuyOnlyPreset(): Promise<unknown[]> {
     ["sell_max_slippage_bps", "1500"],
     ["sell_retry_slippage_step_bps", "400"],
     ["sell_max_retry_slippage_bps", "2300"],
-    ["max_open_positions", "100"],
+    ["max_open_positions", "500"],
     ["signal_max_age_seconds", "600"],
     ["token_cooldown_seconds", "0"],
   ];

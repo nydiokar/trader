@@ -53,6 +53,37 @@ model Trade {
   @@map("trades")
 }
 
+// Trader-owned paper quote record for intelligence-gated buy signals. This is
+// quote-only evaluation data and must never be treated as a fill or execution.
+model PaperQuoteAttempt {
+  id                   String  @id @default(uuid())
+  signalId             String  @unique @map("signal_id")
+  runId                String? @map("run_id")
+  tokenMint            String  @map("token_mint")
+  requestedAmountSol   Float   @map("requested_amount_sol")
+  liveAmountSol        Float   @map("live_amount_sol")
+  maxSlippageBps       Int     @map("max_slippage_bps")
+  entryPriceUsd        Float?  @map("entry_price_usd")
+  entryLiquidityUsd    Float?  @map("entry_liquidity_usd")
+  intelligenceAction   String? @map("intelligence_action")
+  intelligenceLane     String? @map("intelligence_lane")
+  intelligenceMode     String? @map("intelligence_mode")
+  intelligenceVersion  String? @map("intelligence_version")
+  vectorHitsJson       String  @map("vector_hits_json")
+  routeJson            String? @map("route_json")
+  quoteOutAmount       String? @map("quote_out_amount")
+  priceImpactPct       Float?  @map("price_impact_pct")
+  quoteErrorKind       String? @map("quote_error_kind")
+  quoteErrorMessage    String? @map("quote_error_message")
+  liveExecutionAllowed Boolean @map("live_execution_allowed")
+  liveBlockReason      String? @map("live_block_reason")
+  createdAt            Int     @map("created_at")
+
+  @@index([tokenMint], name: "idx_paper_quote_attempt_token_mint")
+  @@index([createdAt], name: "idx_paper_quote_attempt_created_at")
+  @@map("paper_quote_attempts")
+}
+
 // Flow dry-run pre-execution journal. DB is the durable idempotency record;
 // JSON files are rebuilt operator artifacts.
 model ExecutionJournal {

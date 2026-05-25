@@ -18,6 +18,7 @@ import {
   handleFlowExitSignal,
 } from "../flow/exit.js";
 import { runBlockers, runTripwires } from "../risk/index.js";
+import { recordPaperQuoteAttempt } from "../paper/quote-attempts.js";
 import { getSolanaRpc, getTradingSigner } from "../solana/runtime.js";
 import { verifyHmac } from "./auth.js";
 import {
@@ -145,6 +146,12 @@ type TripwireCheck = (
   tokenMint: string,
 ) => Promise<{ triggered: string[] }>;
 type LiveSettingsLoader = () => Promise<LiveSettings>;
+type PaperQuoteRecorder = (input: {
+  executionPayload: Parameters<SignalProcessor>[0];
+  requestedAmountSol: number;
+  liveExecutionAllowed?: boolean;
+  liveBlockReason?: string | null;
+}) => Promise<{ id: string }>;
 
 export async function registerRoutes(
   app: FastifyInstance,
@@ -154,6 +161,7 @@ export async function registerRoutes(
     blockerCheck?: BlockerCheck;
     tripwireCheck?: TripwireCheck;
     liveSettingsLoader?: LiveSettingsLoader;
+    paperQuoteRecorder?: PaperQuoteRecorder;
   },
 ): Promise<void> {
   const processSignal: SignalProcessor =
@@ -163,6 +171,7 @@ export async function registerRoutes(
   const blockerCheck = options?.blockerCheck ?? runBlockers;
   const tripwireCheck = options?.tripwireCheck ?? runTripwires;
   const liveSettingsLoader = options?.liveSettingsLoader ?? getLiveSettings;
+  const paperQuoteRecorder = options?.paperQuoteRecorder ?? recordPaperQuoteAttempt;
 
   app.get("/healthz", async (_req, reply) => {
     let dbOk = false;
@@ -418,11 +427,18 @@ export async function registerRoutes(
       );
 
       if (blocker.blocked) {
+        const paperQuoteAttemptId = await recordBlockedPaperQuoteAttemptId(
+          paperQuoteRecorder,
+          executionPayload,
+          payload,
+          blocker.reason,
+        );
         rejections.inc({ reason: blocker.reason });
         const rejectionResponse = {
           status: "rejected",
           decision: blocker.reason,
           signal_id: payload.signal_id,
+          ...(paperQuoteAttemptId ? { paper_quote_attempt_id: paperQuoteAttemptId } : {}),
         };
 
         completeSignal(
@@ -457,12 +473,19 @@ export async function registerRoutes(
         );
 
         if (config.TRIPWIRES_AS_BLOCKERS) {
+          const paperQuoteAttemptId = await recordBlockedPaperQuoteAttemptId(
+            paperQuoteRecorder,
+            executionPayload,
+            payload,
+            "tripwires_triggered",
+          );
           rejections.inc({ reason: "tripwires_triggered" });
           const rejectionResponse = {
             status: "rejected",
             decision: "tripwires_triggered",
             tripwires_triggered: tripwires.triggered,
             signal_id: payload.signal_id,
+            ...(paperQuoteAttemptId ? { paper_quote_attempt_id: paperQuoteAttemptId } : {}),
           };
 
           completeSignal(
@@ -580,6 +603,36 @@ export async function registerRoutes(
       });
     }
   });
+}
+
+async function recordBlockedPaperQuoteAttemptId(
+  paperQuoteRecorder: PaperQuoteRecorder,
+  executionPayload: Parameters<SignalProcessor>[0],
+  payload: SignalPayloadType,
+  liveBlockReason: string,
+): Promise<string | undefined> {
+  if (
+    (executionPayload as { signal_kind?: string }).signal_kind === "add" ||
+    !payload.intelligence_decision
+  ) {
+    return undefined;
+  }
+
+  try {
+    const paperQuote = await paperQuoteRecorder({
+      executionPayload,
+      requestedAmountSol: payload.intelligence_decision.amount_sol ?? payload.amount_sol,
+      liveExecutionAllowed: false,
+      liveBlockReason,
+    });
+    return paperQuote.id;
+  } catch (error) {
+    logger.warn(
+      { err: error, signal_id: payload.signal_id, live_block_reason: liveBlockReason },
+      "blocked paper quote attempt recording failed",
+    );
+    return undefined;
+  }
 }
 
 function applyRuntimeBuySettings(
