@@ -110,8 +110,7 @@ function runIntelligenceGate(
   }
 
   const finalSol = Math.min(requestedSol, config.TRADER_MAX_STAKE_SOL);
-  // Use payload slippage if provided; otherwise fall back to live setting
-  const slippageBps = payload.max_slippage_bps ?? settings.maxSlippageBps;
+  const slippageBps = settings.maxSlippageBps;
 
   return { ok: true, finalAmountSol: finalSol, slippageBps };
 }
@@ -316,7 +315,7 @@ export async function registerRoutes(
         }
 
         const addSol = Math.min(payload.amount_sol, config.TRADER_MAX_STAKE_SOL);
-        const addSlippage = payload.max_slippage_bps ?? 300;
+        const addSlippage = settings.maxSlippageBps;
         executionPayload = {
           ...payload,
           amount_sol: addSol,
