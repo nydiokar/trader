@@ -87,7 +87,7 @@ type ChainClient = {
   ): Promise<Signature>;
   simulateTransaction(
     base64EncodedWireTransaction: Base64EncodedWireTransaction,
-  ): Promise<{ err: unknown; unitsConsumed?: bigint }>;
+  ): Promise<{ err: unknown; unitsConsumed?: bigint; logs?: readonly string[] | null }>;
   getSignatureStatuses(
     signatures: Signature[],
     options?: { searchTransactionHistory?: boolean },
@@ -757,6 +757,7 @@ function createChainClient(rpc: ReturnType<typeof getSolanaRpc>): ChainClient {
       return {
         err: response.value.err,
         unitsConsumed: response.value.unitsConsumed,
+        logs: response.value.logs,
       };
     },
     async getSignatureStatuses(signatures, options) {
@@ -845,14 +846,36 @@ export async function deserializeAndSign(
   if (simulation.err) {
     const simErrJson = JSON.stringify(simulation.err, (_k, v) => (typeof v === "bigint" ? v.toString() : v));
     const parsed = parseSimulationError(simulation.err);
-    throw new JupiterApiError(
-      "simulation_failed",
-      `swap simulation failed: ${simErrJson}`,
-      undefined,
-      parsed.kind === "custom" ? parsed.code : undefined,
-      undefined,
-      parsed.kind === "non_custom" ? parsed.name : undefined,
-    );
+    const logs = simulation.logs ?? [];
+
+    // ATA creation failure due to insufficient wallet balance — the swap route itself is valid,
+    // only our wallet lacks rent. Don't block execution; the real submission will fail fast if
+    // the wallet is genuinely empty, but this lets the trade proceed when the wallet is funded.
+    const isAtaRentFailure =
+      parsed.kind === "custom" &&
+      parsed.code === 1 &&
+      logs.some((l) => l.includes("insufficient lamports")) &&
+      logs.some((l) => l.includes("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"));
+
+    if (isAtaRentFailure) {
+      logger.warn(
+        { simulation_error: simErrJson, simulation_logs: logs },
+        "simulation: ATA rent failure ignored — swap route is valid, wallet needs more SOL to cover rent",
+      );
+    } else {
+      logger.error(
+        { simulation_error: simErrJson, simulation_logs: logs },
+        "simulation failed — logs above show which program threw",
+      );
+      throw new JupiterApiError(
+        "simulation_failed",
+        `swap simulation failed: ${simErrJson}`,
+        undefined,
+        parsed.kind === "custom" ? parsed.code : undefined,
+        undefined,
+        parsed.kind === "non_custom" ? parsed.name : undefined,
+      );
+    }
   }
 
   return { transaction };
