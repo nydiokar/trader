@@ -848,34 +848,18 @@ export async function deserializeAndSign(
     const parsed = parseSimulationError(simulation.err);
     const logs = simulation.logs ?? [];
 
-    // ATA creation failure due to insufficient wallet balance — the swap route itself is valid,
-    // only our wallet lacks rent. Don't block execution; the real submission will fail fast if
-    // the wallet is genuinely empty, but this lets the trade proceed when the wallet is funded.
-    const isAtaRentFailure =
-      parsed.kind === "custom" &&
-      parsed.code === 1 &&
-      logs.some((l) => l.includes("insufficient lamports")) &&
-      logs.some((l) => l.includes("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"));
-
-    if (isAtaRentFailure) {
-      logger.warn(
-        { simulation_error: simErrJson, simulation_logs: logs },
-        "simulation: ATA rent failure ignored — swap route is valid, wallet needs more SOL to cover rent",
-      );
-    } else {
-      logger.error(
-        { simulation_error: simErrJson, simulation_logs: logs },
-        "simulation failed — logs above show which program threw",
-      );
-      throw new JupiterApiError(
-        "simulation_failed",
-        `swap simulation failed: ${simErrJson}`,
-        undefined,
-        parsed.kind === "custom" ? parsed.code : undefined,
-        undefined,
-        parsed.kind === "non_custom" ? parsed.name : undefined,
-      );
-    }
+    logger.error(
+      { simulation_error: simErrJson, simulation_logs: logs },
+      "simulation failed — logs above show which program threw",
+    );
+    throw new JupiterApiError(
+      "simulation_failed",
+      `swap simulation failed: ${simErrJson}`,
+      undefined,
+      parsed.kind === "custom" ? parsed.code : undefined,
+      undefined,
+      parsed.kind === "non_custom" ? parsed.name : undefined,
+    );
   }
 
   return { transaction };
