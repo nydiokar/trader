@@ -13,6 +13,8 @@ export const IntelligenceDecision = z.object({
   version: z.string().optional(),
   max_slippage_bps: z.number().optional(),
   metrics: z.record(z.string(), z.unknown()).optional(),
+  // Upstream strategy identity — gated against the trader's live strategy_allowlist.
+  strategy_id: z.string().optional(),
 });
 
 export type IntelligenceDecisionType = z.infer<typeof IntelligenceDecision>;
@@ -35,6 +37,8 @@ export const LegacySignalPayload = z.object({
   entry_liquidity_usd: z.number().nonnegative().optional().nullable(),
   planned_exit_policy_label: z.string().min(1).optional(),
   intelligence_decision: IntelligenceDecision.optional(),
+  // Upstream strategy identity — gated against the trader's live strategy_allowlist.
+  strategy_id: z.string().optional(),
   // Probe-and-add contract fields. signal_kind defaults to 'probe' for backwards compat.
   signal_kind: z.enum(["probe", "add"]).optional().default("probe"),
   parent_signal_id: z.string().optional(),
@@ -55,6 +59,7 @@ export const ContractDecisionPayload = z.object({
   planned_exit_policy_label: z.string().optional(),
   max_slippage_bps: z.number().optional(),
   metrics: z.record(z.string(), z.unknown()).optional(),
+  strategy_id: z.string().optional(),
 }).passthrough();
 
 export const ContractOrderRequestSignalPayload = z.object({
@@ -75,6 +80,7 @@ export const ContractOrderRequestSignalPayload = z.object({
   planned_exit_policy_label: z.string().min(1).optional(),
   decision: ContractDecisionPayload.optional(),
   intelligence_decision: IntelligenceDecision.optional(),
+  strategy_id: z.string().optional(),
   signal_kind: z.enum(["probe", "add"]).optional().default("probe"),
   parent_signal_id: z.string().optional(),
 }).transform((payload) => {
@@ -109,6 +115,7 @@ export const ContractOrderRequestSignalPayload = z.object({
     entry_liquidity_usd: payload.entry_liquidity_usd,
     planned_exit_policy_label: payload.planned_exit_policy_label,
     intelligence_decision: intelligenceDecision,
+    strategy_id: payload.strategy_id ?? payload.decision?.strategy_id,
     signal_kind: payload.signal_kind,
     parent_signal_id: payload.parent_signal_id,
   };

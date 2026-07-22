@@ -10,7 +10,7 @@ import {
 } from "../metrics/registry.js";
 import { config } from "../config.js";
 import { executeSignal } from "../executor/index.js";
-import { getLiveSettings, type LiveSettings } from "../runtime/live-settings.js";
+import { getLiveSettings, isStrategyLive, type LiveSettings } from "../runtime/live-settings.js";
 import { finalAmountSolHistogram } from "../metrics/registry.js";
 import {
   extractFlowExitSignals,
@@ -57,16 +57,17 @@ type IntelligenceGateResult =
   | { ok: true; finalAmountSol: number; slippageBps: number }
   | { ok: false; reason: string };
 
-function runIntelligenceGate(
+async function runIntelligenceGate(
   payload: {
     amount_sol: number;
     max_slippage_bps?: number;
     planned_exit_policy_label?: string;
     entry_price_usd?: number;
+    strategy_id?: string;
     intelligence_decision?: IntelligenceDecisionType;
   },
   settings: LiveSettings,
-): IntelligenceGateResult {
+): Promise<IntelligenceGateResult> {
   const intel = payload.intelligence_decision;
 
   if (!intel) {
@@ -79,6 +80,15 @@ function runIntelligenceGate(
 
   if (intel.lane !== "core_ev") {
     return { ok: false, reason: "intelligence_lane_not_core_ev" };
+  }
+
+  // Live strategy registry gate. The trader owns which strategies may execute real
+  // money via the DB `strategy_allowlist` (runtime_settings) — NOT env flags. Empty
+  // allowlist ⇒ fail-closed, nothing trades. Add a strategy live with:
+  //   pnpm live:settings -- strategy add <strategy_id>
+  const strategyId = intel.strategy_id ?? payload.strategy_id;
+  if (!(await isStrategyLive(strategyId))) {
+    return { ok: false, reason: "strategy_not_in_allowlist" };
   }
 
   const vectorHits = intel.vector_hits ?? [];
@@ -126,6 +136,7 @@ type SignalProcessor = (payload: {
   planned_exit_policy_label?: string;
   client_timestamp?: number;
   intelligence_decision?: IntelligenceDecisionType;
+  strategy_id?: string;
   signal_kind?: "probe" | "add";
   parent_signal_id?: string;
 }) => Promise<{
@@ -328,7 +339,7 @@ export async function registerRoutes(
         finalAmountSolHistogram.observe(addSol);
         logger.info({ signal_id: payload.signal_id, parent_signal_id: parentId, amount_sol: addSol }, "add signal gate passed");
       } else if (payload.intelligence_decision) {
-        const gate = runIntelligenceGate(payload, settings);
+        const gate = await runIntelligenceGate(payload, settings);
 
         if (!gate.ok) {
           rejections.inc({ reason: gate.reason });
