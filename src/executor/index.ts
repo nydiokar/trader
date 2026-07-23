@@ -442,6 +442,25 @@ export async function executeSignalWithDependencies(
       input.maxSlippageBps,
     );
 
+    // Surface the entry economics we're quoting into. This is the price we would
+    // get in at; without this line the quote is fetched, used, and discarded with
+    // nothing in the log or the Trade row. Amounts are raw (lamports / token base
+    // units — decimals not yet known); price_impact_pct and the ratio are readable.
+    const quoteOutRaw = Number(quote.outAmount);
+    logger.info(
+      {
+        signal_id: input.signalId,
+        token_mint: input.tokenMint,
+        amount_sol_in: input.amountSol,
+        quote_out_raw: quote.outAmount,
+        min_out_raw: quote.otherAmountThreshold,
+        price_impact_pct: quote.priceImpactPct,
+        sol_per_token_out: quoteOutRaw > 0 ? input.amountSol / quoteOutRaw : null,
+        max_slippage_bps: input.maxSlippageBps,
+      },
+      "quote received — entering",
+    );
+
     const priorityFeeMicroLamports = await deps.priorityFeeClient.getPriorityFeeEstimate();
     const swapResponse = await deps.quoteClient.getSwap(
       quote,
@@ -529,6 +548,20 @@ export async function executeSignalWithDependencies(
     }
 
       const latencySeconds = Math.round(signalToConfirmSec);
+      const actualOut = reconciliation?.ok ? reconciliation.amountOutActual : 0;
+      logger.info(
+        {
+          signal_id: input.signalId,
+          token_mint: input.tokenMint,
+          signature: signature.toString(),
+          amount_sol_in: input.amountSol,
+          tokens_out_actual: actualOut,
+          entry_sol_per_token: actualOut > 0 ? input.amountSol / actualOut : null,
+          submitted_via: submittedVia,
+          latency_seconds: latencySeconds,
+        },
+        "buy confirmed — entered",
+      );
       await registerOpenPositionAfterBuy(input, reconciliation);
       await safeNotify(
         deps.notify,
