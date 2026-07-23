@@ -195,6 +195,10 @@ type PositionFeedbackInput = {
   entryPriceUsd: number;
   entryLiquidityUsd?: number | null;
   policyLabel: string;
+  // ADR-016: strategy identity + exit spec, forwarded to engine /positions/open so the canonical
+  // per-strategy exit decider owns the exit. Optional for legacy/no-strategy signals.
+  strategyId?: string | null;
+  exitSpecId?: string | null;
   signalKind?: "probe" | "add";
   parentSignalId?: string;
 };
@@ -654,6 +658,9 @@ async function registerOpenPositionAfterBuy(input: {
         token_decimals: reconciliation.tokenDecimals,
         policy_label: input.positionFeedback.policyLabel,
         signal_kind: input.positionFeedback.signalKind ?? "probe",
+        // ADR-016: strategy identity on the live position row for the canonical exit decider.
+        ...(input.positionFeedback.strategyId ? { strategy_id: input.positionFeedback.strategyId } : {}),
+        ...(input.positionFeedback.exitSpecId ? { exit_spec_id: input.positionFeedback.exitSpecId } : {}),
         ...(input.positionFeedback.parentSignalId ? { parent_signal_id: input.positionFeedback.parentSignalId } : {}),
       }),
     });

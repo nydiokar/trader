@@ -137,6 +137,7 @@ type SignalProcessor = (payload: {
   client_timestamp?: number;
   intelligence_decision?: IntelligenceDecisionType;
   strategy_id?: string;
+  exit_spec_id?: string;
   signal_kind?: "probe" | "add";
   parent_signal_id?: string;
 }) => Promise<{
@@ -724,6 +725,10 @@ async function executeSignalWithRuntimeRetries(
             entryPriceUsd: payload.entry_price_usd,
             entryLiquidityUsd: payload.entry_liquidity_usd ?? null,
             policyLabel: payload.planned_exit_policy_label,
+            // ADR-016: forward strategy identity + exit spec so the engine's canonical per-strategy
+            // exit decider governs this position (not the legacy policy_label trailing stop).
+            strategyId: payload.strategy_id ?? payload.intelligence_decision?.strategy_id,
+            exitSpecId: payload.exit_spec_id ?? payload.intelligence_decision?.exit_spec_id,
             signalKind: (payload as { signal_kind?: "probe" | "add" }).signal_kind ?? "probe",
             ...(((payload as { parent_signal_id?: string }).parent_signal_id))
               ? { parentSignalId: (payload as { parent_signal_id?: string }).parent_signal_id }

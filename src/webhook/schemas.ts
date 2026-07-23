@@ -15,6 +15,9 @@ export const IntelligenceDecision = z.object({
   metrics: z.record(z.string(), z.unknown()).optional(),
   // Upstream strategy identity — gated against the trader's live strategy_allowlist.
   strategy_id: z.string().optional(),
+  // ADR-016: pointer to the strategy's tested exit spec, forwarded to /positions/open so the
+  // engine's canonical per-strategy exit decider resolves the correct settlement.
+  exit_spec_id: z.string().optional(),
 });
 
 export type IntelligenceDecisionType = z.infer<typeof IntelligenceDecision>;
@@ -39,6 +42,8 @@ export const LegacySignalPayload = z.object({
   intelligence_decision: IntelligenceDecision.optional(),
   // Upstream strategy identity — gated against the trader's live strategy_allowlist.
   strategy_id: z.string().optional(),
+  // ADR-016: exit spec pointer forwarded to /positions/open.
+  exit_spec_id: z.string().optional(),
   // Probe-and-add contract fields. signal_kind defaults to 'probe' for backwards compat.
   signal_kind: z.enum(["probe", "add"]).optional().default("probe"),
   parent_signal_id: z.string().optional(),
@@ -60,6 +65,7 @@ export const ContractDecisionPayload = z.object({
   max_slippage_bps: z.number().optional(),
   metrics: z.record(z.string(), z.unknown()).optional(),
   strategy_id: z.string().optional(),
+  exit_spec_id: z.string().optional(),
 }).passthrough();
 
 export const ContractOrderRequestSignalPayload = z.object({
@@ -81,6 +87,7 @@ export const ContractOrderRequestSignalPayload = z.object({
   decision: ContractDecisionPayload.optional(),
   intelligence_decision: IntelligenceDecision.optional(),
   strategy_id: z.string().optional(),
+  exit_spec_id: z.string().optional(),
   signal_kind: z.enum(["probe", "add"]).optional().default("probe"),
   parent_signal_id: z.string().optional(),
 }).transform((payload) => {
@@ -99,6 +106,7 @@ export const ContractOrderRequestSignalPayload = z.object({
           version: payload.decision.decision_version ?? payload.decision.schema_version,
           max_slippage_bps: payload.decision.max_slippage_bps,
           metrics: payload.decision.metrics,
+          exit_spec_id: payload.decision.exit_spec_id,
         }
       : undefined
   );
@@ -116,6 +124,7 @@ export const ContractOrderRequestSignalPayload = z.object({
     planned_exit_policy_label: payload.planned_exit_policy_label,
     intelligence_decision: intelligenceDecision,
     strategy_id: payload.strategy_id ?? payload.decision?.strategy_id,
+    exit_spec_id: payload.exit_spec_id ?? payload.decision?.exit_spec_id ?? payload.intelligence_decision?.exit_spec_id,
     signal_kind: payload.signal_kind,
     parent_signal_id: payload.parent_signal_id,
   };
