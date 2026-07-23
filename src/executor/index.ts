@@ -576,17 +576,34 @@ export async function executeSignalWithDependencies(
 
     const errorKind = error instanceof JupiterApiError ? error.kind : undefined;
 
-    logger.error(
-      {
-        err: error,
-        signal_id: input.signalId,
-        signature: signature?.toString(),
-        error_kind: errorKind,
-      },
-      submissionAttempted
-        ? "executor failed after submission"
-        : "executor failed before submission",
-    );
+    // Insufficient-funds pre-submit failures are expected while the wallet is kept
+    // dry — demote to a single quiet WARN with no stack dump so the log stays legible.
+    const isInsufficientFunds =
+      !submissionAttempted &&
+      error instanceof JupiterApiError &&
+      error.kind === "simulation_failed" &&
+      (error.simulationCustomCode === 1 ||
+        error.simulationNonCustomError === "InsufficientFundsForRent" ||
+        error.simulationNonCustomError === "InsufficientFundsForFee");
+
+    if (isInsufficientFunds) {
+      logger.warn(
+        { signal_id: input.signalId, error_kind: errorKind },
+        "executor skipped — wallet has insufficient SOL (expected while wallet is dry)",
+      );
+    } else {
+      logger.error(
+        {
+          err: error,
+          signal_id: input.signalId,
+          signature: signature?.toString(),
+          error_kind: errorKind,
+        },
+        submissionAttempted
+          ? "executor failed after submission"
+          : "executor failed before submission",
+      );
+    }
     await writeTrade(input, createdAt, deps.now(), {
       signature: submissionAttempted ? signature?.toString() ?? null : null,
       state: outcome,
@@ -848,10 +865,28 @@ export async function deserializeAndSign(
     const parsed = parseSimulationError(simulation.err);
     const logs = simulation.logs ?? [];
 
-    logger.error(
-      { simulation_error: simErrJson, simulation_logs: logs },
-      "simulation failed — logs above show which program threw",
-    );
+    // Insufficient-funds simulation failures are expected when the trading wallet
+    // is deliberately kept dry (custom code 1 from SPL Token/Token-2022/ATA at the
+    // wrapped-SOL/ATA funding step, or the InsufficientFundsForRent/Fee non-custom
+    // errors). Log these as a single quiet WARN with no program-trace dump so real
+    // simulation failures stay visible. All other failures keep the full trace.
+    const isInsufficientFunds =
+      (parsed.kind === "custom" && parsed.code === 1) ||
+      (parsed.kind === "non_custom" &&
+        (parsed.name === "InsufficientFundsForRent" ||
+          parsed.name === "InsufficientFundsForFee"));
+
+    if (isInsufficientFunds) {
+      logger.warn(
+        { simulation_error: simErrJson },
+        "simulation skipped — wallet has insufficient SOL (expected while wallet is dry)",
+      );
+    } else {
+      logger.error(
+        { simulation_error: simErrJson, simulation_logs: logs },
+        "simulation failed — logs above show which program threw",
+      );
+    }
     throw new JupiterApiError(
       "simulation_failed",
       `swap simulation failed: ${simErrJson}`,
