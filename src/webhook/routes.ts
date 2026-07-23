@@ -43,6 +43,11 @@ const KNOWN_EXIT_POLICIES = new Set([
   "trail_60_probe_add",
   "trail_60_probe_add15_stop15_floor", // legacy label — kept for old open positions
   "trail_60_probe_add15_stop15",
+  // ADR-016: the canonical research exit — the position is settled by the engine's strategy-dictated exit
+  // monitor (tape-native volume-confirmed bracket + arms), NOT by any trailing-stop the trader knows about.
+  // This label is the stable trader-side contract token; the fine-grained per-bet exit spec travels in the
+  // separate `exit_spec_id` field which the ENGINE resolves. The trader stays a dumb executor either way.
+  "research_v3_realized_vol_mc0_bracket",
 ]);
 
 // Hard risk note patterns that block paid trades regardless of other signals.
