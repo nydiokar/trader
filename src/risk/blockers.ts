@@ -87,6 +87,16 @@ export async function runBlockersWithDependencies(
     }
   }
 
+  // ⚠ TOKEN COOLDOWN IS A TOKEN-LEVEL GUARD — IT MUST STAY 0 FOR research_v3_realized_vol_mc0.
+  // The engine's edge is MULTI-CELL PER TOKEN: one token legitimately opens several independent bets
+  // (q1-q2×mc0, then q3-q4×mc0, then q4+×mc0) on distinct mid-life crossings — this is exactly what the
+  // paper book does and what makes the money. This cooldown keys on `tokenMint`, so ANY value > 0 would
+  // see the FIRST cell's trade and BLOCK the 2nd/3rd cells as `cooldown`, silently killing the very bets
+  // the strategy relies on and desyncing live from paper. Per-(token×cell) dedup is already enforced
+  // upstream by the deterministic signal_id/nonce (ingress.ts) — that is the CORRECT grain. Do NOT raise
+  // token_cooldown_seconds to "prevent duplicate buys": duplicates at the cell grain are already blocked,
+  // and multi-cell is INTENDED, not a duplicate. If a future strategy needs per-token throttling, gate it
+  // per strategy_id — never globally on this shared path. (2026-07-24, paper↔live sync.)
   if (!opts?.skipCooldown) {
     const lastTradeCreatedAt = await deps.getLastTradeCreatedAt(tokenMint);
     const cooldownSeconds =
