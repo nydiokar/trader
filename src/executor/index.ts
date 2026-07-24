@@ -195,6 +195,10 @@ type PositionFeedbackInput = {
   entryPriceUsd: number;
   entryLiquidityUsd?: number | null;
   policyLabel: string;
+  // ADR-016: strategy identity + exit spec, forwarded to engine /positions/open so the canonical
+  // per-strategy exit decider owns the exit. Optional for legacy/no-strategy signals.
+  strategyId?: string | null;
+  exitSpecId?: string | null;
   signalKind?: "probe" | "add";
   parentSignalId?: string;
 };
@@ -438,6 +442,25 @@ export async function executeSignalWithDependencies(
       input.maxSlippageBps,
     );
 
+    // Surface the entry economics we're quoting into. This is the price we would
+    // get in at; without this line the quote is fetched, used, and discarded with
+    // nothing in the log or the Trade row. Amounts are raw (lamports / token base
+    // units — decimals not yet known); price_impact_pct and the ratio are readable.
+    const quoteOutRaw = Number(quote.outAmount);
+    logger.info(
+      {
+        signal_id: input.signalId,
+        token_mint: input.tokenMint,
+        amount_sol_in: input.amountSol,
+        quote_out_raw: quote.outAmount,
+        min_out_raw: quote.otherAmountThreshold,
+        price_impact_pct: quote.priceImpactPct,
+        sol_per_token_out: quoteOutRaw > 0 ? input.amountSol / quoteOutRaw : null,
+        max_slippage_bps: input.maxSlippageBps,
+      },
+      "quote received — entering",
+    );
+
     const priorityFeeMicroLamports = await deps.priorityFeeClient.getPriorityFeeEstimate();
     const swapResponse = await deps.quoteClient.getSwap(
       quote,
@@ -525,6 +548,20 @@ export async function executeSignalWithDependencies(
     }
 
       const latencySeconds = Math.round(signalToConfirmSec);
+      const actualOut = reconciliation?.ok ? reconciliation.amountOutActual : 0;
+      logger.info(
+        {
+          signal_id: input.signalId,
+          token_mint: input.tokenMint,
+          signature: signature.toString(),
+          amount_sol_in: input.amountSol,
+          tokens_out_actual: actualOut,
+          entry_sol_per_token: actualOut > 0 ? input.amountSol / actualOut : null,
+          submitted_via: submittedVia,
+          latency_seconds: latencySeconds,
+        },
+        "buy confirmed — entered",
+      );
       await registerOpenPositionAfterBuy(input, reconciliation);
       await safeNotify(
         deps.notify,
@@ -576,17 +613,34 @@ export async function executeSignalWithDependencies(
 
     const errorKind = error instanceof JupiterApiError ? error.kind : undefined;
 
-    logger.error(
-      {
-        err: error,
-        signal_id: input.signalId,
-        signature: signature?.toString(),
-        error_kind: errorKind,
-      },
-      submissionAttempted
-        ? "executor failed after submission"
-        : "executor failed before submission",
-    );
+    // Insufficient-funds pre-submit failures are expected while the wallet is kept
+    // dry — demote to a single quiet WARN with no stack dump so the log stays legible.
+    const isInsufficientFunds =
+      !submissionAttempted &&
+      error instanceof JupiterApiError &&
+      error.kind === "simulation_failed" &&
+      (error.simulationCustomCode === 1 ||
+        error.simulationNonCustomError === "InsufficientFundsForRent" ||
+        error.simulationNonCustomError === "InsufficientFundsForFee");
+
+    if (isInsufficientFunds) {
+      logger.warn(
+        { signal_id: input.signalId, error_kind: errorKind },
+        "executor skipped — wallet has insufficient SOL (expected while wallet is dry)",
+      );
+    } else {
+      logger.error(
+        {
+          err: error,
+          signal_id: input.signalId,
+          signature: signature?.toString(),
+          error_kind: errorKind,
+        },
+        submissionAttempted
+          ? "executor failed after submission"
+          : "executor failed before submission",
+      );
+    }
     await writeTrade(input, createdAt, deps.now(), {
       signature: submissionAttempted ? signature?.toString() ?? null : null,
       state: outcome,
@@ -637,6 +691,9 @@ async function registerOpenPositionAfterBuy(input: {
         token_decimals: reconciliation.tokenDecimals,
         policy_label: input.positionFeedback.policyLabel,
         signal_kind: input.positionFeedback.signalKind ?? "probe",
+        // ADR-016: strategy identity on the live position row for the canonical exit decider.
+        ...(input.positionFeedback.strategyId ? { strategy_id: input.positionFeedback.strategyId } : {}),
+        ...(input.positionFeedback.exitSpecId ? { exit_spec_id: input.positionFeedback.exitSpecId } : {}),
         ...(input.positionFeedback.parentSignalId ? { parent_signal_id: input.positionFeedback.parentSignalId } : {}),
       }),
     });
@@ -848,10 +905,28 @@ export async function deserializeAndSign(
     const parsed = parseSimulationError(simulation.err);
     const logs = simulation.logs ?? [];
 
-    logger.error(
-      { simulation_error: simErrJson, simulation_logs: logs },
-      "simulation failed — logs above show which program threw",
-    );
+    // Insufficient-funds simulation failures are expected when the trading wallet
+    // is deliberately kept dry (custom code 1 from SPL Token/Token-2022/ATA at the
+    // wrapped-SOL/ATA funding step, or the InsufficientFundsForRent/Fee non-custom
+    // errors). Log these as a single quiet WARN with no program-trace dump so real
+    // simulation failures stay visible. All other failures keep the full trace.
+    const isInsufficientFunds =
+      (parsed.kind === "custom" && parsed.code === 1) ||
+      (parsed.kind === "non_custom" &&
+        (parsed.name === "InsufficientFundsForRent" ||
+          parsed.name === "InsufficientFundsForFee"));
+
+    if (isInsufficientFunds) {
+      logger.warn(
+        { simulation_error: simErrJson },
+        "simulation skipped — wallet has insufficient SOL (expected while wallet is dry)",
+      );
+    } else {
+      logger.error(
+        { simulation_error: simErrJson, simulation_logs: logs },
+        "simulation failed — logs above show which program threw",
+      );
+    }
     throw new JupiterApiError(
       "simulation_failed",
       `swap simulation failed: ${simErrJson}`,

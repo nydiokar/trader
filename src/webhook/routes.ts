@@ -10,7 +10,7 @@ import {
 } from "../metrics/registry.js";
 import { config } from "../config.js";
 import { executeSignal } from "../executor/index.js";
-import { getLiveSettings, type LiveSettings } from "../runtime/live-settings.js";
+import { getLiveSettings, isStrategyLive, type LiveSettings } from "../runtime/live-settings.js";
 import { finalAmountSolHistogram } from "../metrics/registry.js";
 import {
   extractFlowExitSignals,
@@ -43,6 +43,11 @@ const KNOWN_EXIT_POLICIES = new Set([
   "trail_60_probe_add",
   "trail_60_probe_add15_stop15_floor", // legacy label — kept for old open positions
   "trail_60_probe_add15_stop15",
+  // ADR-016: the canonical research exit — the position is settled by the engine's strategy-dictated exit
+  // monitor (tape-native volume-confirmed bracket + arms), NOT by any trailing-stop the trader knows about.
+  // This label is the stable trader-side contract token; the fine-grained per-bet exit spec travels in the
+  // separate `exit_spec_id` field which the ENGINE resolves. The trader stays a dumb executor either way.
+  "research_v3_realized_vol_mc0_bracket",
 ]);
 
 // Hard risk note patterns that block paid trades regardless of other signals.
@@ -57,16 +62,17 @@ type IntelligenceGateResult =
   | { ok: true; finalAmountSol: number; slippageBps: number }
   | { ok: false; reason: string };
 
-function runIntelligenceGate(
+async function runIntelligenceGate(
   payload: {
     amount_sol: number;
     max_slippage_bps?: number;
     planned_exit_policy_label?: string;
     entry_price_usd?: number;
+    strategy_id?: string;
     intelligence_decision?: IntelligenceDecisionType;
   },
   settings: LiveSettings,
-): IntelligenceGateResult {
+): Promise<IntelligenceGateResult> {
   const intel = payload.intelligence_decision;
 
   if (!intel) {
@@ -79,6 +85,15 @@ function runIntelligenceGate(
 
   if (intel.lane !== "core_ev") {
     return { ok: false, reason: "intelligence_lane_not_core_ev" };
+  }
+
+  // Live strategy registry gate. The trader owns which strategies may execute real
+  // money via the DB `strategy_allowlist` (runtime_settings) — NOT env flags. Empty
+  // allowlist ⇒ fail-closed, nothing trades. Add a strategy live with:
+  //   pnpm live:settings -- strategy add <strategy_id>
+  const strategyId = intel.strategy_id ?? payload.strategy_id;
+  if (!(await isStrategyLive(strategyId))) {
+    return { ok: false, reason: "strategy_not_in_allowlist" };
   }
 
   const vectorHits = intel.vector_hits ?? [];
@@ -126,6 +141,8 @@ type SignalProcessor = (payload: {
   planned_exit_policy_label?: string;
   client_timestamp?: number;
   intelligence_decision?: IntelligenceDecisionType;
+  strategy_id?: string;
+  exit_spec_id?: string;
   signal_kind?: "probe" | "add";
   parent_signal_id?: string;
 }) => Promise<{
@@ -328,7 +345,7 @@ export async function registerRoutes(
         finalAmountSolHistogram.observe(addSol);
         logger.info({ signal_id: payload.signal_id, parent_signal_id: parentId, amount_sol: addSol }, "add signal gate passed");
       } else if (payload.intelligence_decision) {
-        const gate = runIntelligenceGate(payload, settings);
+        const gate = await runIntelligenceGate(payload, settings);
 
         if (!gate.ok) {
           rejections.inc({ reason: gate.reason });
@@ -713,6 +730,10 @@ async function executeSignalWithRuntimeRetries(
             entryPriceUsd: payload.entry_price_usd,
             entryLiquidityUsd: payload.entry_liquidity_usd ?? null,
             policyLabel: payload.planned_exit_policy_label,
+            // ADR-016: forward strategy identity + exit spec so the engine's canonical per-strategy
+            // exit decider governs this position (not the legacy policy_label trailing stop).
+            strategyId: payload.strategy_id ?? payload.intelligence_decision?.strategy_id,
+            exitSpecId: payload.exit_spec_id ?? payload.intelligence_decision?.exit_spec_id,
             signalKind: (payload as { signal_kind?: "probe" | "add" }).signal_kind ?? "probe",
             ...(((payload as { parent_signal_id?: string }).parent_signal_id))
               ? { parentSignalId: (payload as { parent_signal_id?: string }).parent_signal_id }

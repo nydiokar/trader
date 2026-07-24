@@ -26,6 +26,8 @@ function sign(secret: string, timestamp: number, body: string): string {
     .digest("hex");
 }
 
+const TEST_STRATEGY_ID = "research_v3_realized_vol_mc0";
+
 const validIntelligenceDecision = {
   action: "probe",
   lane: "core_ev",
@@ -34,6 +36,7 @@ const validIntelligenceDecision = {
   risk_notes: [],
   amount_sol: 0.005,
   planned_exit_policy_label: "core_6buy_abandon15_v0",
+  strategy_id: TEST_STRATEGY_ID,
 };
 
 function buildPayload(
@@ -116,6 +119,11 @@ async function makeApp(options?: {
   const { buildServer } = await import("../src/webhook/server.js");
 
   await connectDb();
+  // Seed the live strategy allowlist so intelligence-gated fixtures are executable.
+  // The gate is fail-closed: without this the strategy is not live and every signal
+  // is rejected with strategy_not_in_allowlist.
+  const { setStrategyAllowlist } = await import("../src/runtime/live-settings.js");
+  await setStrategyAllowlist(TEST_STRATEGY_ID);
   const app = await buildServer({
     processSignal:
       options?.processSignal ??
@@ -169,6 +177,44 @@ describe("M1 webhook ingress", () => {
         status: "queued",
         signal_id: "11111111-1111-4111-8111-111111111111",
       });
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("rejects a signal whose strategy_id is not in the live allowlist", async () => {
+    const processSignal = vi.fn().mockResolvedValue({
+      state: "done",
+      decision: "accepted",
+      response: { status: "queued", signal_id: "11111111-1111-4111-8111-111111111111" },
+    });
+    const ctx = await makeApp({ processSignal });
+    try {
+      // Overwrite the seeded allowlist with a DIFFERENT strategy — the fixture's
+      // strategy is no longer live, so the gate must reject fail-closed.
+      const { setStrategyAllowlist } = await import("../src/runtime/live-settings.js");
+      await setStrategyAllowlist("some_other_strategy");
+
+      const body = JSON.stringify(buildPayload());
+      const timestamp = Math.floor(Date.now() / 1000);
+
+      const response = await ctx.app.inject({
+        method: "POST",
+        url: "/signal",
+        payload: body,
+        headers: {
+          "content-type": "application/json",
+          "x-timestamp": String(timestamp),
+          "x-signature": sign(process.env["WEBHOOK_SECRET"]!, timestamp, body),
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({
+        status: "rejected",
+        decision: "strategy_not_in_allowlist",
+      });
+      expect(processSignal).not.toHaveBeenCalled();
     } finally {
       await ctx.cleanup();
     }

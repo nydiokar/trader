@@ -1,13 +1,15 @@
 import {
   getDbKillSwitch,
+  getStrategyAllowlist,
   listLiveSettings,
   liveSettingKeys,
   setDbKillSwitch,
   setLiveSetting,
+  setStrategyAllowlist,
 } from "../runtime/live-settings.js";
 import { disconnectDb } from "../db/index.js";
 
-type Command = "list" | "get" | "set" | "preset" | "kill-switch" | "help";
+type Command = "list" | "get" | "set" | "preset" | "kill-switch" | "strategy" | "help";
 
 function usage(): string {
   return [
@@ -18,6 +20,10 @@ function usage(): string {
     "  pnpm live:settings -- set <key> <value>",
     "  pnpm live:settings -- preset buy-only",
     "  pnpm live:settings -- kill-switch on|off",
+    "  pnpm live:settings -- strategy list",
+    "  pnpm live:settings -- strategy add <strategy_id>",
+    "  pnpm live:settings -- strategy remove <strategy_id>",
+    "  pnpm live:settings -- strategy set <id1,id2,...>",
     "",
     "Common keys:",
     "  live_execution_enabled",
@@ -83,6 +89,11 @@ async function main(): Promise<void> {
       return;
     }
 
+    if (command === "strategy") {
+      await runStrategyCommand(argv.slice(1));
+      return;
+    }
+
     const state = required(argv[1], "on|off");
     if (state !== "on" && state !== "off") {
       fail("kill-switch must be on or off");
@@ -92,6 +103,47 @@ async function main(): Promise<void> {
   } finally {
     await disconnectDb();
   }
+}
+
+async function runStrategyCommand(args: string[]): Promise<void> {
+  const sub = args[0] ?? "list";
+  const current = await getStrategyAllowlist();
+
+  if (sub === "list") {
+    printStrategyList([...current]);
+    return;
+  }
+
+  if (sub === "add" || sub === "remove") {
+    const id = required(args[1], "strategy_id");
+    if (sub === "add") current.add(id);
+    else current.delete(id);
+    const result = await setStrategyAllowlist([...current].join(","));
+    console.log(`strategy ${sub}: ${id}`);
+    printStrategyList(result.value ? result.value.split(",") : []);
+    return;
+  }
+
+  if (sub === "set") {
+    const raw = required(args[1], "id1,id2,...");
+    const result = await setStrategyAllowlist(raw);
+    console.log("strategy allowlist set");
+    printStrategyList(result.value ? result.value.split(",") : []);
+    return;
+  }
+
+  fail(`unknown strategy subcommand: ${sub} (use list|add|remove|set)`);
+}
+
+function printStrategyList(ids: string[]): void {
+  console.log("");
+  console.log(`  LIVE STRATEGY ALLOWLIST (${ids.length})`);
+  if (ids.length === 0) {
+    console.log("    (empty — fail-closed, NO strategy will execute)");
+  } else {
+    for (const id of ids) console.log(`    - ${id}`);
+  }
+  console.log("");
 }
 
 async function applyBuyOnlyPreset(): Promise<unknown[]> {
@@ -126,6 +178,7 @@ async function applyBuyOnlyPreset(): Promise<unknown[]> {
 async function printList(): Promise<void> {
   const rows = await listLiveSettings();
   const killSwitch = await getDbKillSwitch();
+  const allowlist = await getStrategyAllowlist();
 
   const byKey = Object.fromEntries(rows.map((r) => [r.key, r]));
 
@@ -168,6 +221,8 @@ async function printList(): Promise<void> {
     "token_cooldown_seconds",
   ], byKey);
 
+  printStrategyList([...allowlist]);
+
   console.log("");
 }
 
@@ -199,6 +254,7 @@ function parseCommand(raw: string | undefined): Command {
     raw === "set" ||
     raw === "preset" ||
     raw === "kill-switch" ||
+    raw === "strategy" ||
     raw === "help" ||
     raw === "--help" ||
     raw === "-h"

@@ -289,6 +289,58 @@ export function liveSettingKeys(): string[] {
   return definitions.map((definition) => definition.storageKey);
 }
 
+/**
+ * Storage key for the live strategy allowlist. This is the trader-owned registry
+ * that decides which upstream strategies may execute real money — the replacement
+ * for per-strategy env flags. Stored as a comma-separated list of strategy_ids in
+ * the same runtime_settings table, so it is changed live via `pnpm live:settings`
+ * with NO process restart. Empty (unset) = fail-closed, nothing executes.
+ */
+export const STRATEGY_ALLOWLIST_KEY = "strategy_allowlist";
+
+/** Reads the live strategy allowlist as a set. Empty/unset ⇒ empty set (deliver nothing). */
+export async function getStrategyAllowlist(): Promise<Set<string>> {
+  await ensureLiveSettingsTable();
+  const rows = await readRows();
+  const raw = rows.get(STRATEGY_ALLOWLIST_KEY)?.value ?? "";
+  return parseAllowlist(raw);
+}
+
+/** Parses a comma-separated allowlist; trims blanks, drops empties. Order-independent. */
+export function parseAllowlist(raw: string): Set<string> {
+  return new Set(
+    raw
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0),
+  );
+}
+
+/** Returns true only when strategyId is a non-empty member of the live allowlist. Fail-closed. */
+export async function isStrategyLive(strategyId: string | null | undefined): Promise<boolean> {
+  if (typeof strategyId !== "string" || strategyId.length === 0) return false;
+  const allowlist = await getStrategyAllowlist();
+  return allowlist.has(strategyId);
+}
+
+/** Sets the live strategy allowlist from a comma-separated string. Normalized before persist. */
+export async function setStrategyAllowlist(raw: string): Promise<{ value: string; updatedAt: number }> {
+  await ensureLiveSettingsTable();
+  const value = [...parseAllowlist(raw)].join(",");
+  const updatedAt = Math.floor(Date.now() / 1000);
+  await db.$executeRawUnsafe(
+    `
+      INSERT INTO runtime_settings (key, value, updated_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+    `,
+    STRATEGY_ALLOWLIST_KEY,
+    value,
+    updatedAt,
+  );
+  return { value, updatedAt };
+}
+
 async function ensureLiveSettingsTable(): Promise<void> {
   await db.$executeRawUnsafe(`
     CREATE TABLE IF NOT EXISTS runtime_settings (
