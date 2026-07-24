@@ -133,6 +133,38 @@ export async function handleFlowExitSignal(
     return claim.result;
   }
 
+  // FROZEN-ERROR-LOGGER-01: once claimed the row is `processing`, and ONLY this function moves it
+  // off that state. Any unexpected throw below (not just the handled RPC/sell failures) therefore
+  // wedges the position for the full 10-minute processing_timeout while a submitted tx may already
+  // be landing — what happened to a6634f68 on 2026-07-24. Release the claim on the way out so the
+  // next tick retries immediately, then rethrow for the route to report.
+  try {
+    return await runClaimedExit(signal, deps, claim);
+  } catch (err) {
+    try {
+      await db.flowExitExecution.updateMany({
+        where: { positionId: signal.position_id, state: "processing" },
+        data: {
+          state: "sell_failed",
+          errorReason: "exit_handler_crashed",
+          errorMessage: err instanceof Error ? err.message : String(err),
+          completedAt: new Date(),
+        },
+      });
+    } catch {
+      // best-effort release; the processing_timeout path remains as the backstop
+    }
+    throw err;
+  }
+}
+
+async function runClaimedExit(
+  signal: FlowExitSignal,
+  deps: { getTokenBalance?: (tokenMint: string) => Promise<string> },
+  claim: { kind: "claimed"; row: Awaited<ReturnType<typeof upsertExitRow>> },
+): Promise<FlowExitResult> {
+  const settings = await getLiveSettings();
+
   let liveBalance: string;
   try {
     liveBalance = await (deps.getTokenBalance ?? getWalletTokenBalanceRaw)(signal.token_mint);

@@ -386,19 +386,31 @@ export async function executeTokenSellWithDependencies(
     const errorKind = jupErr?.kind;
     const simCustomCode = jupErr?.simulationCustomCode;
     const simNonCustom = jupErr?.simulationNonCustomError;
-    logger.error(
-      {
-        err: error,
-        exit_id: input.exitId,
-        signature: signature?.toString(),
-        error_kind: errorKind,
-        ...(simCustomCode !== undefined ? { simulation_custom_code: simCustomCode } : {}),
-        ...(simNonCustom !== undefined ? { simulation_error: simNonCustom } : {}),
-      },
-      submissionAttempted
-        ? "exit sell failed after submission"
-        : "exit sell failed before submission",
-    );
+    // FROZEN-ERROR-LOGGER-01: logging must never prevent this catch block from returning.
+    // A throw here (pino choking on a non-extensible error) escapes the catch, so the sell
+    // outcome is never persisted while the tx may already be on chain — the exact failure
+    // that wedged position a6634f68 on 2026-07-24. Swallow logging faults; the return below
+    // is what actually matters.
+    try {
+      logger.error(
+        {
+          err: error,
+          exit_id: input.exitId,
+          signature: signature?.toString(),
+          error_kind: errorKind,
+          ...(simCustomCode !== undefined ? { simulation_custom_code: simCustomCode } : {}),
+          ...(simNonCustom !== undefined ? { simulation_error: simNonCustom } : {}),
+        },
+        submissionAttempted
+          ? "exit sell failed after submission"
+          : "exit sell failed before submission",
+      );
+    } catch {
+      console.error(
+        `[exit sell failed] exit_id=${input.exitId} signature=${signature?.toString() ?? "none"} ` +
+          `submitted=${submissionAttempted} error=${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
     return {
       state: "failed",
       decision: outcome,
