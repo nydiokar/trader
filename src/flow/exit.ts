@@ -137,13 +137,32 @@ export async function handleFlowExitSignal(
   try {
     liveBalance = await (deps.getTokenBalance ?? getWalletTokenBalanceRaw)(signal.token_mint);
   } catch (err) {
-    // RPC failure — release the claim so the next poller tick can retry cleanly
+    // RPC failure — release the claim so the next poller tick can retry cleanly.
+    // MANUAL-SELL-FALSE-POSITIVE-01: a missing token account lands here too (NoTokenAccountError) and is
+    // treated the SAME as any transient RPC fault — retry — NEVER as "the owner sold it". Closing a position
+    // on an absent account is unrecoverable: it marks the row closed while the tokens are still in the wallet.
+    const noAccount = err instanceof NoTokenAccountError;
     await db.flowExitExecution.update({
       where: { positionId: signal.position_id },
-      data: { state: "sell_failed", errorReason: "rpc_error", errorMessage: err instanceof Error ? err.message : String(err), completedAt: new Date() },
+      data: {
+        state: "sell_failed",
+        errorReason: noAccount ? "token_account_not_visible" : "rpc_error",
+        errorMessage: err instanceof Error ? err.message : String(err),
+        completedAt: new Date(),
+      },
     });
-    logger.error({ err, position_id: signal.position_id }, "balance RPC failed — released claim for retry");
-    return { status: "failed", position_id: signal.position_id, journal_id: claim.row.id, error: "rpc_error" };
+    logger.error(
+      { err, position_id: signal.position_id, no_token_account: noAccount },
+      noAccount
+        ? "no token account at confirmed commitment — retrying, NOT treating as a manual sell"
+        : "balance RPC failed — released claim for retry",
+    );
+    return {
+      status: "failed",
+      position_id: signal.position_id,
+      journal_id: claim.row.id,
+      error: noAccount ? "token_account_not_visible" : "rpc_error",
+    };
   }
   const tokenAmountRaw = BigInt(liveBalance) > 0n
     ? liveBalance
@@ -164,19 +183,45 @@ export async function handleFlowExitSignal(
         "manual sell resolved from chain",
       );
     } else {
-      logger.warn({ position_id: signal.position_id }, "manual sell: could not resolve tx from chain, closing with no sell data");
+      // MANUAL-SELL-FALSE-POSITIVE-01: zero balance AND no resolvable sell tx = unexplained. Closing here
+      // books a position as sold with no signature, no proceeds and no P&L (the DhT7jP incident, 2026-07-24).
+      // Refuse: leave it claimed-failed so the poller retries and a human can see it.
+      logger.error(
+        { position_id: signal.position_id, token_mint: signal.token_mint },
+        "zero balance but NO sell tx on chain — refusing to close as manually_sold (needs investigation)",
+      );
+      const row = await upsertExitRow(signal, {
+        state: "sell_failed",
+        dryRun: false,
+        tokenAmountRaw,
+        errorReason: "zero_balance_no_sell_tx",
+        errorMessage: "wallet balance zero but no on-chain sell found; not closing without proceeds",
+        completedAt: new Date(),
+      });
+      notify(
+        `⚠️ <b>UNEXPLAINED ZERO BALANCE</b>\nToken: <code>${signal.token_mint}</code>\nPosition: <code>${signal.position_id}</code>\nBalance reads zero but no sell tx was found on chain. Position left OPEN for investigation.`,
+      ).catch((err) => logger.warn({ err }, "telegram zero-balance notification failed"));
+      return {
+        status: "failed",
+        position_id: signal.position_id,
+        journal_id: row.id,
+        error: "zero_balance_no_sell_tx",
+      };
     }
-    const closeResult = await closePosition(signal.position_id, "manually_sold", chainSell
-      ? { sell_signature: chainSell.signature, sell_sol_received: chainSell.solReceived, sell_submitted_via: "manual" }
-      : undefined,
-    );
+    // Reached ONLY with a resolved on-chain sell (the no-tx branch above returns), so the position is always
+    // closed WITH a signature + proceeds — never as an empty "sold" row.
+    const closeResult = await closePosition(signal.position_id, "manually_sold", {
+      sell_signature: chainSell.signature,
+      sell_sol_received: chainSell.solReceived,
+      sell_submitted_via: "manual",
+    });
     const row = await upsertExitRow(signal, {
       state: closeResult.ok ? "closed" : "sell_confirmed_close_pending",
       dryRun: false,
       tokenAmountRaw,
-      signature: chainSell?.signature ?? null,
-      solReceived: chainSell?.solReceived ?? null,
-      submittedVia: chainSell ? "manual" : null,
+      signature: chainSell.signature,
+      solReceived: chainSell.solReceived,
+      submittedVia: "manual",
       closeReason: "manually_sold",
       closeCallbackStatus: closeResult.status,
       closeCallbackResponse: closeResult.body,
@@ -185,8 +230,8 @@ export async function handleFlowExitSignal(
       completedAt: closeResult.ok ? new Date() : null,
     });
     if (closeResult.ok) {
-      const solLine = chainSell ? `\nSOL received: ${chainSell.solReceived.toFixed(6)} SOL` : "";
-      const txLine = chainSell ? `\nTx: https://solscan.io/tx/${chainSell.signature}` : "";
+      const solLine = `\nSOL received: ${chainSell.solReceived.toFixed(6)} SOL`;
+      const txLine = `\nTx: https://solscan.io/tx/${chainSell.signature}`;
       notify(
         `✅ <b>MANUAL SELL DETECTED</b>\nToken: <code>${signal.token_mint}</code>\nPosition: <code>${signal.position_id}</code>${solLine}${txLine}\nWallet balance was zero — position closed on Flow.`,
       ).catch((err) => logger.warn({ err }, "telegram manual-sell notification failed"));
@@ -782,7 +827,11 @@ async function getWalletTokenBalanceRaw(tokenMint: string): Promise<string> {
         params: [
           signer.address.toString(),
           { mint: tokenMint },
-          { encoding: "jsonParsed" },
+          // MANUAL-SELL-FALSE-POSITIVE-01: pin the commitment. Without it the node may answer from a slot that
+          // predates the just-created token account (exits can fire ~8s after the buy confirms), returning an
+          // EMPTY account list that the caller reads as "balance 0" => "manual sell" => the position is closed
+          // WITHOUT ever submitting a sell.
+          { encoding: "jsonParsed", commitment: "confirmed" },
         ],
       }),
     });
@@ -812,12 +861,30 @@ async function getWalletTokenBalanceRaw(tokenMint: string): Promise<string> {
     throw new Error(`token balance RPC failed: ${payload.error.message ?? "unknown error"}`);
   }
 
-  const total = (payload.result?.value ?? []).reduce((sum, account) => {
+  const accounts = payload.result?.value ?? [];
+  // MANUAL-SELL-FALSE-POSITIVE-01: an EMPTY account list is NOT proof of a sale — it is equally consistent
+  // with "the token account is not visible at this commitment yet" (a buy that confirmed seconds ago). Only a
+  // token account that EXISTS and reads zero is real evidence the position was sold. Signal the difference to
+  // the caller instead of collapsing both cases to "0".
+  if (accounts.length === 0) throw new NoTokenAccountError(tokenMint);
+
+  const total = accounts.reduce((sum, account) => {
     const amount = account.account?.data?.parsed?.info?.tokenAmount?.amount;
     return amount && /^\d+$/.test(amount) ? sum + BigInt(amount) : sum;
   }, 0n);
 
   return total.toString();
+}
+
+/**
+ * No SPL token account for (wallet, mint) at the queried commitment. Distinct from "account exists, balance 0"
+ * so a not-yet-visible account can never be misread as a manual sell (MANUAL-SELL-FALSE-POSITIVE-01).
+ */
+export class NoTokenAccountError extends Error {
+  constructor(tokenMint: string) {
+    super(`no token account for mint ${tokenMint} at confirmed commitment`);
+    this.name = "NoTokenAccountError";
+  }
 }
 
 const LAMPORTS_PER_SOL = 1_000_000_000;
