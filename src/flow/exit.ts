@@ -921,7 +921,10 @@ async function resolveManualSellFromChain(
     const url = new URL(`https://api.helius.xyz/v0/addresses/${walletAddress}/transactions`);
     url.searchParams.set("api-key", config.HELIUS_API_KEY);
     url.searchParams.set("limit", "100");
-    url.searchParams.set("type", "SWAP");
+    // MANUAL-SELL-FALSE-POSITIVE-02: do NOT filter on type=SWAP. Helius assigns ONE label per tx, and a
+    // Jupiter sell that closes its WSOL account is labelled CLOSE_ACCOUNT, not SWAP — such a sell is then
+    // invisible here, the caller sees "zero balance, no sell tx" and alerts forever (position a6634f68,
+    // 2026-07-24). The tokenBalanceChanges predicate below is the real test and needs no type filter.
     if (before) url.searchParams.set("before", before);
 
     let response: Response;
