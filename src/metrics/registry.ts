@@ -159,3 +159,23 @@ closePendingCount.set(0);
 walletSolBalance.set(0);
 dailySpendSol.set(0);
 killSwitchGauge.set(0);
+
+// ── Reset witness (DESK_OBSERVABILITY_SPINE) ────────────────────────────────
+// Every counter in this registry resets to 0 on `pm2 restart`. A scraper cannot
+// reliably detect that from the counter itself: with a 60s scrape and a 5s
+// restart delay the counter usually climbs back ABOVE its previous value before
+// the next sample, so 100 -> restart -> 105 reads as a monotone +5 while 100
+// events were silently lost.
+//
+// This gauge is the witness. It is set ONCE at module load and never mutated,
+// so any change in its scraped value is a hard restart boundary regardless of
+// counter direction. prom-client's collectDefaultMetrics() would also provide
+// this, but the registry above is deliberately explicit-only — one gauge is
+// cheaper than pulling in ~30 default series we do not use.
+export const processStartTimeSeconds = new Gauge({
+  name: "process_start_time_seconds",
+  help: "Start time of the process since unix epoch in seconds",
+  registers: [register],
+});
+
+processStartTimeSeconds.set(Date.now() / 1000);

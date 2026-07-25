@@ -223,7 +223,29 @@ export async function registerRoutes(
     });
   });
 
-  app.get("/metrics", async (_req, reply) => {
+  // Gated: this endpoint exposes wallet_sol_balance, daily_spend_sol and
+  // kill_switch. The server listens on 0.0.0.0 (src/index.ts), so leaving it
+  // open publishes the wallet balance and whether the safety is off to anyone
+  // who can reach the port.
+  //
+  // Shared-secret header rather than verifyHmac: HMAC here signs a request
+  // BODY, and this is a GET with none.
+  //
+  // Uses its OWN variable, deliberately NOT TOKENS_INGEST_SERVICE_SECRET —
+  // that one authenticates trader->ingest calls, and reusing it would couple
+  // two unrelated concerns and silently close this endpoint wherever that
+  // credential happens to be set.
+  //
+  // Fail-OPEN when unset so local setups and existing monitoring do not break
+  // on upgrade. Set METRICS_SCRAPE_SECRET to close it.
+  app.get("/metrics", async (request, reply) => {
+    const required = process.env["METRICS_SCRAPE_SECRET"];
+    if (required) {
+      const provided = request.headers["x-service-secret"];
+      if (typeof provided !== "string" || provided !== required) {
+        return reply.code(403).send({ error: "forbidden" });
+      }
+    }
     killSwitchGauge.set(config.KILL_SWITCH ? 1 : 0);
     const metrics = await register.metrics();
     return reply.header("Content-Type", register.contentType).send(metrics);

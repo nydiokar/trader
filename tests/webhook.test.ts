@@ -332,7 +332,46 @@ describe("M1 webhook ingress", () => {
       expect(body).toContain("wallet_sol_balance 1.25");
       expect(body).toContain("daily_spend_sol 0");
       expect(body).toContain("kill_switch 0");
+      // Reset witness — lets a scraper detect a restart that a counter
+      // down-step would miss (counter climbs back above its old value between
+      // scrapes). See src/metrics/registry.ts.
+      expect(body).toContain("process_start_time_seconds");
     } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("gates /metrics behind METRICS_SCRAPE_SECRET when it is set", async () => {
+    // The endpoint publishes wallet_sol_balance and kill_switch, and the server
+    // binds 0.0.0.0 — an open /metrics leaks the balance and whether the safety
+    // is off to anyone who can reach the port.
+    const prior = process.env["METRICS_SCRAPE_SECRET"];
+    process.env["METRICS_SCRAPE_SECRET"] = "m".repeat(32);
+    const ctx = await makeApp({
+      healthCheck: vi.fn().mockResolvedValue({ rpcOk: true, walletSol: 1.25 }),
+    });
+    try {
+      const denied = await ctx.app.inject({ method: "GET", url: "/metrics" });
+      expect(denied.statusCode).toBe(403);
+      expect(denied.body).not.toContain("wallet_sol_balance");
+
+      const wrong = await ctx.app.inject({
+        method: "GET",
+        url: "/metrics",
+        headers: { "x-service-secret": "wrong" },
+      });
+      expect(wrong.statusCode).toBe(403);
+
+      const allowed = await ctx.app.inject({
+        method: "GET",
+        url: "/metrics",
+        headers: { "x-service-secret": "m".repeat(32) },
+      });
+      expect(allowed.statusCode).toBe(200);
+      expect(allowed.body).toContain("wallet_sol_balance");
+    } finally {
+      if (prior === undefined) delete process.env["METRICS_SCRAPE_SECRET"];
+      else process.env["METRICS_SCRAPE_SECRET"] = prior;
       await ctx.cleanup();
     }
   });
