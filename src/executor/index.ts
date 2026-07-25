@@ -199,6 +199,10 @@ type PositionFeedbackInput = {
   // per-strategy exit decider owns the exit. Optional for legacy/no-strategy signals.
   strategyId?: string | null;
   exitSpecId?: string | null;
+  // LIVE-BET-CONTEXT-01: opaque per-bet context, forwarded VERBATIM to /positions/open. The trader does
+  // not interpret it; the engine's exit decider does (today: `statemap_cross_sec`, the crossing this buy
+  // is for). Dropping it silently costs real money — see the schema comment in webhook/schemas.ts.
+  betParams?: Record<string, unknown> | null;
   signalKind?: "probe" | "add";
   parentSignalId?: string;
 };
@@ -706,6 +710,8 @@ async function registerOpenPositionAfterBuy(input: {
         // ADR-016: strategy identity on the live position row for the canonical exit decider.
         ...(input.positionFeedback.strategyId ? { strategy_id: input.positionFeedback.strategyId } : {}),
         ...(input.positionFeedback.exitSpecId ? { exit_spec_id: input.positionFeedback.exitSpecId } : {}),
+        // LIVE-BET-CONTEXT-01: forward the bet context verbatim → `open_positions.params`.
+        ...(input.positionFeedback.betParams ? { bet_params: input.positionFeedback.betParams } : {}),
         ...(input.positionFeedback.parentSignalId ? { parent_signal_id: input.positionFeedback.parentSignalId } : {}),
       }),
     });

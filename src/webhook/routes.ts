@@ -143,6 +143,8 @@ type SignalProcessor = (payload: {
   intelligence_decision?: IntelligenceDecisionType;
   strategy_id?: string;
   exit_spec_id?: string;
+  // LIVE-BET-CONTEXT-01: opaque per-bet context forwarded verbatim to /positions/open.
+  bet_params?: Record<string, unknown>;
   signal_kind?: "probe" | "add";
   parent_signal_id?: string;
 }) => Promise<{
@@ -756,6 +758,8 @@ async function executeSignalWithRuntimeRetries(
             // exit decider governs this position (not the legacy policy_label trailing stop).
             strategyId: payload.strategy_id ?? payload.intelligence_decision?.strategy_id,
             exitSpecId: payload.exit_spec_id ?? payload.intelligence_decision?.exit_spec_id,
+            // LIVE-BET-CONTEXT-01: forward the engine's per-bet context untouched (see schemas.ts).
+            betParams: (payload as { bet_params?: Record<string, unknown> }).bet_params,
             signalKind: (payload as { signal_kind?: "probe" | "add" }).signal_kind ?? "probe",
             ...(((payload as { parent_signal_id?: string }).parent_signal_id))
               ? { parentSignalId: (payload as { parent_signal_id?: string }).parent_signal_id }

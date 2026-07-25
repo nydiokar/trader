@@ -44,6 +44,13 @@ export const LegacySignalPayload = z.object({
   strategy_id: z.string().optional(),
   // ADR-016: exit spec pointer forwarded to /positions/open.
   exit_spec_id: z.string().optional(),
+  // LIVE-BET-CONTEXT-01: opaque per-bet context forwarded VERBATIM to /positions/open →
+  // `open_positions.params`. The trader does NOT interpret it — it is the engine's exit decider that
+  // needs it. Today it carries `statemap_cross_sec`, the crossing this buy is FOR; without it the
+  // decider re-derives the token's first-ever crossing and can settle the position on a round-trip
+  // that completed before we owned it (a real position was bought at t=1552s and sold 3.4s later on
+  // a crossing from t=40s). Passthrough record so a new bet-context key needs no trader change.
+  bet_params: z.record(z.string(), z.unknown()).optional(),
   // Probe-and-add contract fields. signal_kind defaults to 'probe' for backwards compat.
   signal_kind: z.enum(["probe", "add"]).optional().default("probe"),
   parent_signal_id: z.string().optional(),
