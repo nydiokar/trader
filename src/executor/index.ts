@@ -1114,7 +1114,8 @@ export async function submitViaRpc(input: {
   });
 }
 
-async function pollForConfirmation(
+// Exported for CONFIRM-POLL-GETBLOCKHEIGHT-ISOLATION-01 regression coverage only.
+export async function pollForConfirmation(
   connection: ChainClient,
   signature: Signature,
   lastValidBlockHeight: number,
@@ -1124,10 +1125,17 @@ async function pollForConfirmation(
   const startedAt = now();
 
   while (now() - startedAt < CONFIRM_TIMEOUT_MS) {
-    const [status, blockHeight] = await Promise.all([
-      connection.getSignatureStatuses([signature], { searchTransactionHistory: false }),
-      connection.getBlockHeight("confirmed"),
-    ]);
+    // CONFIRM-POLL-GETBLOCKHEIGHT-ISOLATION-01: the signature status is the AUTHORITATIVE
+    // confirmation signal; getBlockHeight is only needed for the expiry check. Previously both
+    // ran inside one Promise.all, so an intermittent Helius `-32600 "Invalid method"` on
+    // getBlockHeight (the same fault the rebroadcast loop above already guards at ~L1090) rejected
+    // the WHOLE poll iteration, the loop threw, and a tx that had actually confirmed got booked
+    // `uncertain` (stranding a landed buy with amount_out=NULL — e.g. trade #5504, token 77hmW8gA,
+    // 2026-07-25). Fix: read the status independently and honor a confirmed/finalized status even
+    // when getBlockHeight fails; a failed getBlockHeight only skips THIS round's expiry check.
+    const status = await connection.getSignatureStatuses([signature], {
+      searchTransactionHistory: false,
+    });
 
     const currentStatus = status[0];
     if (
@@ -1137,7 +1145,16 @@ async function pollForConfirmation(
       return currentStatus.err ? "failed_onchain" : "confirmed";
     }
 
-    if (blockHeight > lastValidBlockHeight) {
+    let blockHeight: number | null = null;
+    try {
+      blockHeight = await connection.getBlockHeight("confirmed");
+    } catch (err) {
+      // Cannot determine expiry this round — do NOT discard the good status read above; keep
+      // polling. The next iteration re-checks the signature; the outer CONFIRM_TIMEOUT_MS bounds it.
+      logger.warn({ err }, "confirm poll: getBlockHeight failed, skipping expiry check this round");
+    }
+
+    if (blockHeight != null && blockHeight > lastValidBlockHeight) {
       await sleep(EXPIRY_FINAL_CHECK_DELAY_MS);
       const [finalCheck] = await connection.getSignatureStatuses([signature], {
         searchTransactionHistory: false,
