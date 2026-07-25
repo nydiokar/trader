@@ -1058,7 +1058,8 @@ function resolveSubmissionMode(deps: ExecutorDependencies): SubmissionMode {
 
 const RPC_REBROADCAST_INTERVAL_MS = 2_000;
 
-async function submitViaRpc(input: {
+/** @internal exported for testing only */
+export async function submitViaRpc(input: {
   deps: ExecutorDependencies;
   lastValidBlockHeight: number;
   signedWireTransaction: Base64EncodedWireTransaction;
@@ -1074,11 +1075,26 @@ async function submitViaRpc(input: {
   });
 
   // Rebroadcast in background every 2s until block height expires — does not block confirmation polling.
+  // RPC-REBROADCAST-CRASH-01: nothing awaits this IIFE, so ANY throw that escapes it becomes an
+  // unhandled rejection and Node terminates the process — killing confirmation polling for every
+  // in-flight position, not just this one. Helius intermittently answers getBlockHeight with
+  // -32600 "Invalid method" (a method it does support), which crashed the trader 8x on 2026-07-25.
+  // The rebroadcast is best-effort: the tx was already submitted above. Give up, never throw.
   void (async () => {
     const startedAt = input.deps.now();
     while (input.deps.now() - startedAt < CONFIRM_TIMEOUT_MS) {
       await input.deps.sleep(RPC_REBROADCAST_INTERVAL_MS);
-      const blockHeight = await input.deps.connection.getBlockHeight("confirmed");
+
+      let blockHeight: number;
+      try {
+        blockHeight = await input.deps.connection.getBlockHeight("confirmed");
+      } catch (err) {
+        // Cannot determine expiry — stop rebroadcasting. pollForConfirmation still owns
+        // the real outcome for this trade.
+        logger.warn({ err }, "rpc rebroadcast: getBlockHeight failed, stopping rebroadcast");
+        break;
+      }
+
       if (blockHeight > input.lastValidBlockHeight) {
         break;
       }
@@ -1091,7 +1107,11 @@ async function submitViaRpc(input: {
         // Ignore rebroadcast errors — tx may already be confirmed.
       }
     }
-  })();
+  })().catch((err: unknown) => {
+    // Backstop: the loop above should never throw, but this IIFE must not be able to
+    // reject regardless of what changes inside it.
+    logger.warn({ err }, "rpc rebroadcast loop terminated unexpectedly");
+  });
 }
 
 async function pollForConfirmation(

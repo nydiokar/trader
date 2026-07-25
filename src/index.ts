@@ -6,7 +6,26 @@ import { getSolanaRpc, getTradingSigner } from "./solana/runtime.js";
 import { FlowExitPoller } from "./flow/exit-poller.js";
 import { getLiveSettings } from "./runtime/live-settings.js";
 
+// RPC-REBROADCAST-CRASH-01: a detached `void (async () => ...)()` anywhere in the codebase
+// turns one transient RPC fault into a process kill under Node's default unhandled-rejection
+// behaviour — taking down confirmation polling for every in-flight position, not just the one
+// that faulted. Individual call sites are guarded; this is the backstop for the ones that
+// get added later. Log and keep serving rather than dying.
+function installProcessGuards(): void {
+  process.on("unhandledRejection", (reason: unknown) => {
+    logger.error({ err: reason }, "unhandled promise rejection — process kept alive");
+  });
+
+  // An uncaughtException leaves the process in an undefined state; log it so the crash is
+  // attributable, then let it terminate and PM2 restart cleanly.
+  process.on("uncaughtException", (err: unknown) => {
+    logger.fatal({ err }, "uncaught exception — exiting");
+    process.exit(1);
+  });
+}
+
 async function main(): Promise<void> {
+  installProcessGuards();
   await connectDb();
   await validateStartupReadiness();
   await validateIntelligenceConfig();
