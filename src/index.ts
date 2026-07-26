@@ -34,7 +34,7 @@ async function main(): Promise<void> {
 
   const address = await app.listen({
     port: config.WEBHOOK_PORT,
-    host: "0.0.0.0",
+    host: config.WEBHOOK_BIND_HOST,
   });
 
   logger.info({ address }, "trader bot listening");

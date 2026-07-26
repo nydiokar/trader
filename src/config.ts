@@ -51,6 +51,11 @@ const ConfigSchema = z.object({
   // Webhook
   WEBHOOK_SECRET: z.string().min(32),
   WEBHOOK_PORT: z.coerce.number().int().positive().default(8089),
+  // Loopback by default: /metrics exposes wallet balance, daily spend and the
+  // kill-switch state, and its secret gate fails OPEN when unset. Binding to
+  // 127.0.0.1 closes that exposure even on an unconfigured install. Set to
+  // 0.0.0.0 only when the sender genuinely lives on another host.
+  WEBHOOK_BIND_HOST: z.string().default("127.0.0.1"),
   TOKENS_INGEST_BASE_URL: z.string().url().optional(),
   TOKENS_INGEST_SERVICE_SECRET: z.string().min(32).optional(),
   FLOW_EXIT_POLL_ENABLED: booleanEnv("false"),
