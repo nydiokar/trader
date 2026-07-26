@@ -65,3 +65,33 @@ describe("LIVE-BET-CONTEXT-01: bet_params survives the trader", () => {
     expect(buildBody({ exitSpecId: "x", betParams: null })).not.toHaveProperty("bet_params");
   });
 });
+
+/**
+ * CANONICAL_ENTRY_TIMING_PATHWAY — `confirmed_at` (true on-chain buy time, epoch SECONDS) must survive
+ * the trader onto the /positions/open body. Same class of silent-drop risk as bet_params: the body is
+ * built field-by-field, so a dropped conditional-spread would surface only as a NULL `bought_at` column
+ * and a stale exit clock weeks later. These pins mirror the executor's guard exactly:
+ *   `...(input.confirmedAtSec && input.confirmedAtSec > 0 ? { confirmed_at: input.confirmedAtSec } : {})`
+ */
+describe("CANONICAL_ENTRY_TIMING_PATHWAY: confirmed_at survives the trader", () => {
+  // Mirror of the executor's conditional spread for confirmed_at (executor/index.ts). Guarded on
+  // truthy-and-positive so a zero/undefined confirm time is OMITTED, never sent as `confirmed_at: 0`.
+  const buildBody = (input: { confirmedAtSec?: number }) => ({
+    token_address: BASE.token_mint,
+    ...(input.confirmedAtSec && input.confirmedAtSec > 0 ? { confirmed_at: input.confirmedAtSec } : {}),
+  });
+
+  it("1. a real confirm second is carried through to the engine", () => {
+    const body = buildBody({ confirmedAtSec: 1_753_000_000 });
+    expect(body).toHaveProperty("confirmed_at");
+    expect((body as { confirmed_at: number }).confirmed_at).toBe(1_753_000_000);
+  });
+
+  it("2. absent confirm time ⇒ the key is omitted (legacy body, receiver falls back to opened_at)", () => {
+    expect(buildBody({})).not.toHaveProperty("confirmed_at");
+  });
+
+  it("3. a zero/falsy confirm time ⇒ omitted, never sent as confirmed_at: 0 (no 1970 bought_at)", () => {
+    expect(buildBody({ confirmedAtSec: 0 })).not.toHaveProperty("confirmed_at");
+  });
+});

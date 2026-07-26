@@ -578,7 +578,14 @@ export async function executeSignalWithDependencies(
         },
         "buy confirmed — entered",
       );
-      await registerOpenPositionAfterBuy({ ...input, buySignature: signature.toString() }, reconciliation);
+      await registerOpenPositionAfterBuy(
+        // CANONICAL_ENTRY_TIMING_PATHWAY: thread the TRUE on-chain confirm time to the engine so its
+        // ownership/exit clock is honest. `confirmTimeMs` (snapshotted line 526, before reconciliation/
+        // SLO/Telegram) is the SAME value that becomes `Trade.confirmedAt` in writeTrade — reading it
+        // here introduces no new clock; it forwards the one that already exists at the point of confirm.
+        { ...input, buySignature: signature.toString(), confirmedAtSec: Math.floor(confirmTimeMs / 1000) },
+        reconciliation,
+      );
       await safeNotify(
         deps.notify,
         formatTradeConfirmed({
@@ -696,6 +703,14 @@ async function registerOpenPositionAfterBuy(input: {
    * system, and their agreement is mechanically assertable. The trader stays a dumb executor.
    */
   buySignature?: string;
+  /**
+   * CANONICAL_ENTRY_TIMING_PATHWAY: the TRUE on-chain buy-confirmation time in Unix EPOCH SECONDS
+   * (`Math.floor(confirmTimeMs / 1000)`, the same value written to `Trade.confirmedAt`). Forwarded so
+   * the engine can anchor ownership/exit on when we ACTUALLY owned the token, not on `opened_at`
+   * (its own HTTP-arrival `defaultNow()`, which lags the fill by submission latency). Optional so the
+   * trader can deploy after the engine has already shipped the receiver-side optional field.
+   */
+  confirmedAtSec?: number;
 }, reconciliation?: ReconciliationResult): Promise<void> {
   if (!config.TOKENS_INGEST_BASE_URL || !input.positionFeedback) return;
   if (!reconciliation?.ok) return;
@@ -723,6 +738,9 @@ async function registerOpenPositionAfterBuy(input: {
         // LIVE-BET-CONTEXT-01: forward the bet context verbatim → `open_positions.params`.
         ...(input.positionFeedback.betParams ? { bet_params: input.positionFeedback.betParams } : {}),
         ...(input.positionFeedback.parentSignalId ? { parent_signal_id: input.positionFeedback.parentSignalId } : {}),
+        // CANONICAL_ENTRY_TIMING_PATHWAY: the true on-chain confirm time (epoch seconds) → the engine's
+        // honest ownership clock (`open_positions.bought_at`). Guarded so a bad/zero value is never sent.
+        ...(input.confirmedAtSec && input.confirmedAtSec > 0 ? { confirmed_at: input.confirmedAtSec } : {}),
       }),
     });
 
