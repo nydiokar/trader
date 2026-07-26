@@ -182,13 +182,6 @@ type ReconciliationResult =
       amountOutRaw: bigint;
       tokenDecimals: number;
       slippageActual?: number;
-      /**
-       * REALIZED-ENTRY-BASIS-01: the SOL actually spent on this buy, read from the CONFIRMED tx
-       * (wallet lamport delta minus fee) — the same value as `slippageActual`, named for what it is
-       * so it can serve as the SOL leg of the realized entry price. Undefined when the chain read
-       * failed; the caller then falls back to the requested amount.
-       */
-      solSpentActual?: number;
       warning?: string;
     }
   | {
@@ -699,20 +692,6 @@ async function registerOpenPositionAfterBuy(input: {
   if (!config.TOKENS_INGEST_BASE_URL || !input.positionFeedback) return;
   if (!reconciliation?.ok) return;
 
-  // ★ REALIZED-ENTRY-BASIS-01 — report the SOL we ACTUALLY spent, from the confirmed tx.
-  //
-  // `input.amountSol` is the REQUESTED size; the confirmed wallet lamport delta is what left the
-  // wallet. The engine divides (SOL spent × SOL/USD) by (tokens received) to get the price we PAID.
-  // Both legs of that division are now chain-truth: `solSpentActual` from preBalances/postBalances
-  // (minus fee) and `token_amount_raw` from pre/postTokenBalances. Previously the engine stored
-  // `entryPriceUsd` — the price observed at CROSSING DETECTION, sent BEFORE the buy was submitted —
-  // so detection→fill lag was silently booked as our cost basis (measured 2026-07-25: detected @mc
-  // 8704, filled @mc ~7.4k, a 16% overstatement). Every TP/stop/fill_multiple reads that column.
-  //
-  // `entry_price_usd` is still sent (the engine falls back to it when the chain legs are unusable),
-  // but it is now the FALLBACK, not the basis.
-  const solSpentActual = reconciliation.solSpentActual;
-
   try {
     const response = await fetch(new URL("/positions/open", config.TOKENS_INGEST_BASE_URL), {
       method: "POST",
@@ -724,7 +703,6 @@ async function registerOpenPositionAfterBuy(input: {
         entry_price_usd: input.positionFeedback.entryPriceUsd,
         entry_liquidity_usd: input.positionFeedback.entryLiquidityUsd ?? null,
         size_sol: input.amountSol,
-        ...(solSpentActual != null && solSpentActual > 0 ? { sol_spent_actual: solSpentActual } : {}),
         token_amount_raw: reconciliation.amountOutRaw.toString(),
         token_decimals: reconciliation.tokenDecimals,
         policy_label: input.positionFeedback.policyLabel,
@@ -1314,16 +1292,7 @@ async function reconcileConfirmedTrade(
 
   const slippageActual = reconcileSolSpent(transaction, wallet, input.signalId, signature.toString());
 
-  // REALIZED-ENTRY-BASIS-01: the same chain-read lamport delta doubles as the realized SOL leg.
-  return {
-    ok: true,
-    amountOutActual,
-    amountOutRaw,
-    tokenDecimals: decimals,
-    slippageActual,
-    solSpentActual: slippageActual,
-    warning,
-  };
+  return { ok: true, amountOutActual, amountOutRaw, tokenDecimals: decimals, slippageActual, warning };
 }
 
 function reconcileSolSpent(
