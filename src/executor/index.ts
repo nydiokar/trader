@@ -578,7 +578,7 @@ export async function executeSignalWithDependencies(
         },
         "buy confirmed — entered",
       );
-      await registerOpenPositionAfterBuy(input, reconciliation);
+      await registerOpenPositionAfterBuy({ ...input, buySignature: signature.toString() }, reconciliation);
       await safeNotify(
         deps.notify,
         formatTradeConfirmed({
@@ -688,6 +688,14 @@ async function registerOpenPositionAfterBuy(input: {
   tokenMint: string;
   amountSol: number;
   positionFeedback?: PositionFeedbackInput;
+  /**
+   * REALIZED-ENTRY-BASIS-02: the CONFIRMED buy signature. Forwarded to the engine so it can decode
+   * the swap event and price the entry at the EXECUTED price (`sol_amount / token_amount` from the
+   * swap itself — no fees, no rent, no quote). The engine owns the decode because it already owns
+   * the tape decoder (`sol-parser-sdk`), so entry and tape end up on ONE decoder, in one unit
+   * system, and their agreement is mechanically assertable. The trader stays a dumb executor.
+   */
+  buySignature?: string;
 }, reconciliation?: ReconciliationResult): Promise<void> {
   if (!config.TOKENS_INGEST_BASE_URL || !input.positionFeedback) return;
   if (!reconciliation?.ok) return;
@@ -698,6 +706,8 @@ async function registerOpenPositionAfterBuy(input: {
       headers: tokensIngestHeaders({ "content-type": "application/json" }),
       body: JSON.stringify({
         token_address: input.tokenMint,
+        // REALIZED-ENTRY-BASIS-02: let the engine price the entry off the real swap event.
+        ...(input.buySignature ? { buy_signature: input.buySignature } : {}),
         run_id: input.positionFeedback.runId ?? null,
         signal_id: input.positionFeedback.signalId ?? input.signalId,
         entry_price_usd: input.positionFeedback.entryPriceUsd,
