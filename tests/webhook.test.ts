@@ -548,6 +548,43 @@ describe("M1 webhook ingress", () => {
     }
   });
 
+  // NONCE_GATE_RETRY_DEADLOCK. Senders derive signal_id AND nonce deterministically from the bet
+  // key, so an idempotent retry necessarily reuses BOTH. The nonce gate used to run before the
+  // idempotency layer and answered those retries with a permanent 409 that `enterSignal` never got
+  // to answer — a confirmed on-chain buy was re-POSTed for 7.5h because the sender could not learn
+  // it had already succeeded. The retry must get the stored result back.
+  it("identical resend (same signal_id AND same nonce) returns the stored result, not 409", async () => {
+    const ctx = await makeApp();
+    try {
+      const payload = buildPayload();
+      const body = JSON.stringify(payload);
+
+      const send = async () => {
+        const timestamp = Math.floor(Date.now() / 1000);
+        return ctx.app.inject({
+          method: "POST",
+          url: "/signal",
+          payload: body,
+          headers: {
+            "content-type": "application/json",
+            "x-timestamp": String(timestamp),
+            "x-signature": sign(process.env["WEBHOOK_SECRET"]!, timestamp, body),
+          },
+        });
+      };
+
+      const first = await send();
+      expect(first.statusCode).toBe(200);
+
+      // Byte-identical retry — exactly what the engine re-POSTs next tick.
+      const retry = await send();
+      expect(retry.statusCode).toBe(200);
+      expect(retry.json()).toEqual(first.json());
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
   it("same signal resent after completion returns stored result", async () => {
     const ctx = await makeApp();
     try {

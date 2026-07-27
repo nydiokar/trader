@@ -276,12 +276,36 @@ export async function registerRoutes(
 
     const payload = parsed.data;
 
-    if (!registerNonce(payload.nonce, nowSeconds)) {
-      signalsReceived.inc({ result: "replay" });
-      return reply.code(409).send({ error: "nonce replay" });
-    }
-
+    // NONCE_GATE_RETRY_DEADLOCK: the idempotency layer runs FIRST, and the nonce gate only judges
+    // requests it has never seen before.
+    //
+    // Senders derive signal_id AND nonce deterministically from the bet key, on purpose, so a
+    // process restart re-firing the same bet reuses both and we dedup it. When the nonce gate ran
+    // first it answered those retries with a hard 409 that `enterSignal` — the layer that actually
+    // stores the prior response — never got a chance to answer. A sender whose POST succeeded but
+    // whose response was lost then retried the identical body forever (observed: a confirmed
+    // on-chain buy re-POSTed for 7.5h).
+    //
+    // A nonce is single-use ACROSS DISTINCT signal_ids. Reusing one under the SAME signal_id is an
+    // idempotent retry; reusing one under a NEW signal_id is a replay attack. Only the second is
+    // rejected — `ingress.kind === "proceed"` is exactly "this signal_id is new to us".
     const ingress = enterSignal(payload.signal_id, JSON.stringify(payload), nowSeconds);
+
+    if (ingress.kind === "proceed" && !registerNonce(payload.nonce, nowSeconds)) {
+      signalsReceived.inc({ result: "replay" });
+      // `enterSignal` already inserted this signal as in_flight. Close it out as rejected —
+      // there is no reaper for in_flight rows, so returning here without completing it would
+      // strand the row permanently and make every later retry of this signal_id a 202.
+      const rejectionResponse = { error: "nonce replay", signal_id: payload.signal_id };
+      completeSignal(
+        payload.signal_id,
+        "rejected",
+        "nonce_replay",
+        rejectionResponse,
+        Math.floor(Date.now() / 1000),
+      );
+      return reply.code(409).send(rejectionResponse);
+    }
 
     if (ingress.kind === "in_flight") {
       signalsReceived.inc({ result: "replay" });

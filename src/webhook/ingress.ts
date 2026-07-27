@@ -11,7 +11,18 @@ type SignalState = "received" | "in_flight" | "done" | "failed" | "rejected";
 type StoredSignalRow = {
   state: SignalState;
   result_json: string | null;
+  received_at: number;
 };
+
+/**
+ * How long a signal may sit in `in_flight` before a new delivery of the same signal_id is allowed
+ * to reclaim it. A signal only stays in_flight while /signal is actively executing it, which is
+ * bounded by the swap submit+confirm path (seconds). Anything older means the process died
+ * mid-execution: without reclaiming, that signal_id is answered `already_processing` FOREVER
+ * (rows have been observed stuck since May). Generous enough that it can never race a live
+ * execution, short enough that a retry recovers within one delivery cycle.
+ */
+const IN_FLIGHT_RECLAIM_SECONDS = 300;
 
 export type IngressDecision =
   | {
@@ -36,10 +47,15 @@ const insertNonce = sqlite.prepare(
 const selectSignal = sqlite.prepare<
   [string],
   StoredSignalRow | undefined
->("SELECT state, result_json FROM signals WHERE signal_id = ?");
+>("SELECT state, result_json, received_at FROM signals WHERE signal_id = ?");
 
 const updateReceivedToInFlight = sqlite.prepare(
   "UPDATE signals SET state = 'in_flight' WHERE signal_id = ?",
+);
+
+/** Reclaim a stale in_flight row for a fresh attempt, re-stamping its clock. */
+const reclaimStaleInFlight = sqlite.prepare(
+  "UPDATE signals SET received_at = ?, raw_payload = ? WHERE signal_id = ?",
 );
 
 const insertSignal = sqlite.prepare(
@@ -86,7 +102,15 @@ export function enterSignal(
             : { status: row.state, signal_id: signalId },
         };
       } else if (row.state === "in_flight") {
-        result = { kind: "in_flight" };
+        // A crash mid-execution leaves the row in_flight with nothing to finish it. Past the
+        // reclaim window, treat a fresh delivery of the same signal_id as a new attempt rather
+        // than answering "already_processing" forever.
+        if (nowSeconds - row.received_at >= IN_FLIGHT_RECLAIM_SECONDS) {
+          reclaimStaleInFlight.run(nowSeconds, rawPayload, signalId);
+          result = { kind: "proceed" };
+        } else {
+          result = { kind: "in_flight" };
+        }
       } else {
         updateReceivedToInFlight.run(signalId);
         result = { kind: "proceed" };
