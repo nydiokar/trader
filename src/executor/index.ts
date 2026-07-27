@@ -278,6 +278,7 @@ export async function executeTokenSell(input: {
     signature?: string;
     submitted_via?: SubmissionPath;
     sol_received?: number;
+    sol_received_unresolved?: string;
     dry_run?: boolean;
     error_kind?: string;
   };
@@ -303,6 +304,7 @@ export async function executeTokenSellWithDependencies(
     signature?: string;
     submitted_via?: SubmissionPath;
     sol_received?: number;
+    sol_received_unresolved?: string;
     error_kind?: string;
   };
 }> {
@@ -354,11 +356,12 @@ export async function executeTokenSellWithDependencies(
     );
 
     if (outcome === "confirmed") {
-      const solReceived = await reconcileSolReceivedFromSell(
+      const reconciliation = await reconcileSolReceivedFromSell(
         deps.connection,
         signature,
         deps.wallet.address,
         input.exitId,
+        deps.sleep,
       );
       return {
         state: "done",
@@ -368,7 +371,11 @@ export async function executeTokenSellWithDependencies(
           exit_id: input.exitId,
           signature: signature.toString(),
           submitted_via: submittedVia,
-          ...(solReceived !== undefined ? { sol_received: solReceived } : {}),
+          // SOL-RECEIVED-BACKFILL-GAP-01: exactly one of these is always set on a confirmed
+          // sell, so a NULL sol_received downstream always carries a stated reason.
+          ...(reconciliation.ok
+            ? { sol_received: reconciliation.solReceived }
+            : { sol_received_unresolved: reconciliation.unresolvedReason }),
         },
       };
     }
@@ -1369,46 +1376,106 @@ function reconcileSolSpent(
   return Number(deltaLamports) / 1_000_000_000;
 }
 
-async function reconcileSolReceivedFromSell(
+/**
+ * SOL-RECEIVED-BACKFILL-GAP-01: a confirmed sell must NEVER resolve to a silent `undefined`.
+ * Two defects produced 18 `closed` rows with `signature` set and `sol_received` NULL:
+ *
+ *  (a) `getTransaction` was called the instant `getSignatureStatuses` reported "confirmed".
+ *      Helius has often not indexed the tx at that moment, so the call THREW (or returned
+ *      null) and the catch swallowed it — this is what stranded the 2.0x win d3d77594 on
+ *      2026-07-27 (its wallet delta is +182306 lamports, so no balance predicate applied).
+ *      Fixed by retrying with a short backoff instead of giving up on the first miss.
+ *
+ *  (b) `netLamports <= 0n` returned undefined. At the sizes this book trades (1e-4 SOL),
+ *      the priority fee routinely EXCEEDS the sell proceeds, so a perfectly good stop-loss
+ *      exit has a NEGATIVE net wallet delta. Discarding those silently dropped 17 rows —
+ *      almost all LOSERS — which biases realized EV *upward*, not downward. A non-positive
+ *      net is a real, reportable outcome; only an unparseable tx is unknown.
+ *
+ * Basis note: the returned value is `post - pre` (fee-INCLUSIVE), which is the convention
+ * every already-populated `sol_received` row uses. Verified against 8 recent rows before
+ * changing anything here — do not "improve" this to add the fee back or the column would
+ * carry two different bases and every downstream EV number would silently shift.
+ */
+const SELL_RECONCILE_ATTEMPTS = 4;
+const SELL_RECONCILE_BACKOFF_MS = 900;
+
+export type SellReconciliation =
+  | { ok: true; solReceived: number }
+  | { ok: false; unresolvedReason: string };
+
+/** @internal exported for SOL-RECEIVED-BACKFILL-GAP-01 regression coverage only. */
+export async function reconcileSolReceivedFromSell(
   connection: ChainClient,
   signature: Signature,
   walletAddress: Address,
   exitId: string,
-): Promise<number | undefined> {
-  let transaction: ConfirmedTransactionDetails | null;
-  try {
-    transaction = await connection.getTransaction(signature, { maxSupportedTransactionVersion: 0 });
-  } catch {
-    logger.warn({ exit_id: exitId, signature: signature.toString() }, "sell reconciliation: getTransaction failed");
-    return undefined;
+  sleep?: ExecutorDependencies["sleep"],
+): Promise<SellReconciliation> {
+  const wait = sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  let transaction: ConfirmedTransactionDetails | null = null;
+  let lastFailure: "threw" | "not_found" | null = null;
+
+  for (let attempt = 1; attempt <= SELL_RECONCILE_ATTEMPTS; attempt += 1) {
+    try {
+      transaction = await connection.getTransaction(signature, { maxSupportedTransactionVersion: 0 });
+      lastFailure = transaction ? null : "not_found";
+    } catch {
+      transaction = null;
+      lastFailure = "threw";
+    }
+    if (transaction) break;
+    if (attempt < SELL_RECONCILE_ATTEMPTS) await wait(SELL_RECONCILE_BACKOFF_MS * attempt);
   }
+
   if (!transaction) {
-    logger.warn({ exit_id: exitId, signature: signature.toString() }, "sell reconciliation: transaction not found");
-    return undefined;
+    logger.error(
+      { exit_id: exitId, signature: signature.toString(), attempts: SELL_RECONCILE_ATTEMPTS, reason: lastFailure },
+      "sell reconciliation: transaction unreadable after retries — sol_received left unresolved",
+    );
+    return { ok: false, unresolvedReason: `tx_unreadable:${lastFailure ?? "unknown"}` };
   }
 
   const wallet = walletAddress.toString();
   const accountKeys = transaction.transaction?.message?.accountKeys;
-  if (!accountKeys || accountKeys.length === 0) return undefined;
+  if (!accountKeys || accountKeys.length === 0) {
+    logger.error({ exit_id: exitId, signature: signature.toString() }, "sell reconciliation: accountKeys missing");
+    return { ok: false, unresolvedReason: "account_keys_missing" };
+  }
 
   const walletIndex = accountKeys.findIndex((key) => {
     const pubkey = typeof key === "string" ? key : key.pubkey;
     return pubkey === wallet;
   });
-  if (walletIndex === -1) return undefined;
+  if (walletIndex === -1) {
+    logger.error({ exit_id: exitId, signature: signature.toString() }, "sell reconciliation: wallet not in accountKeys");
+    return { ok: false, unresolvedReason: "wallet_not_in_account_keys" };
+  }
 
   const pre = transaction.meta?.preBalances?.[walletIndex];
   const post = transaction.meta?.postBalances?.[walletIndex];
-  if (pre === undefined || post === undefined) return undefined;
+  if (pre === undefined || post === undefined) {
+    logger.error({ exit_id: exitId, signature: signature.toString(), walletIndex }, "sell reconciliation: pre/post balances missing");
+    return { ok: false, unresolvedReason: "balances_missing" };
+  }
 
   const preLamports = toLamportsBigInt(pre);
   const postLamports = toLamportsBigInt(post);
-  if (preLamports === null || postLamports === null) return undefined;
+  if (preLamports === null || postLamports === null) {
+    logger.error({ exit_id: exitId, signature: signature.toString(), walletIndex }, "sell reconciliation: balances not parseable");
+    return { ok: false, unresolvedReason: "balances_unparseable" };
+  }
 
-  // Net SOL gained in wallet after fees (post already reflects fee deduction).
+  // Net SOL delta on the wallet, fee-inclusive (post already reflects the fee deduction).
+  // May legitimately be <= 0 when fees exceed proceeds — that is a REAL result, not a miss.
   const netLamports = postLamports - preLamports;
-  if (netLamports <= 0n) return undefined;
-  return Number(netLamports) / 1_000_000_000;
+  if (netLamports <= 0n) {
+    logger.warn(
+      { exit_id: exitId, signature: signature.toString(), net_lamports: Number(netLamports) },
+      "sell reconciliation: fees met or exceeded proceeds — recording non-positive realized SOL",
+    );
+  }
+  return { ok: true, solReceived: Number(netLamports) / 1_000_000_000 };
 }
 
 function toLamportsBigInt(value: number | bigint): bigint | null {

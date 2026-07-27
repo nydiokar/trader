@@ -169,6 +169,9 @@ model FlowExitExecution {
   signature             String?
   submittedVia          String?   @map("submitted_via")
   solReceived           Float?    @map("sol_received")
+  // SOL-RECEIVED-BACKFILL-GAP-01: why solReceived is NULL on a row whose sell CONFIRMED.
+  // NULL here + NULL solReceived on a closed row is the invariant violation the alarm hunts.
+  solReceivedUnresolved String?   @map("sol_received_unresolved")
   closeReason           String?   @map("close_reason")
   closeCallbackStatus   String?   @map("close_callback_status")
   closeCallbackResponse String?   @map("close_callback_response")

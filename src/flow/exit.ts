@@ -367,6 +367,9 @@ async function runClaimedExit(
     );
   }
 
+  // SOL-RECEIVED-BACKFILL-GAP-01: a confirmed sell resolves to a number OR a stated reason —
+  // never a silent NULL. `sol_received` may legitimately be <= 0 when fees exceed proceeds at
+  // these micro sizes; that is a real result and must be recorded, not discarded.
   const pendingClose = await upsertExitRow(signal, {
     state: "sell_confirmed_close_pending",
     dryRun: false,
@@ -374,6 +377,7 @@ async function runClaimedExit(
     signature: result.response.signature,
     submittedVia: result.response.submitted_via,
     solReceived: result.response.sol_received,
+    solReceivedUnresolved: result.response.sol_received_unresolved ?? null,
     closeReason: signal.trigger_reason,
     errorReason: null,
     errorMessage: null,
@@ -589,6 +593,8 @@ async function retryCloseOnly(
     signature: row.signature,
     submittedVia: row.submittedVia,
     solReceived: row.solReceived,
+    // carry the reason forward — this upsert must not silently blank it
+    solReceivedUnresolved: row.solReceivedUnresolved ?? null,
     closeReason,
     closeCallbackStatus: closeResult.status,
     closeCallbackResponse: closeResult.body,
@@ -773,6 +779,7 @@ async function upsertExitRow(
     signature?: string | null;
     submittedVia?: string | null;
     solReceived?: number | null;
+    solReceivedUnresolved?: string | null;
     closeReason?: string | null;
     closeCallbackStatus?: string | null;
     closeCallbackResponse?: string | null;
@@ -831,6 +838,7 @@ async function upsertExitRow(
       signature: update.signature,
       submittedVia: update.submittedVia,
       solReceived: update.solReceived,
+      solReceivedUnresolved: update.solReceivedUnresolved,
       closeReason: update.closeReason,
       closeCallbackStatus: update.closeCallbackStatus,
       closeCallbackResponse: update.closeCallbackResponse,
