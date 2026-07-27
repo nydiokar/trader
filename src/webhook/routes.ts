@@ -48,6 +48,12 @@ const KNOWN_EXIT_POLICIES = new Set([
   // This label is the stable trader-side contract token; the fine-grained per-bet exit spec travels in the
   // separate `exit_spec_id` field which the ENGINE resolves. The trader stays a dumb executor either way.
   "research_v3_realized_vol_mc0_bracket",
+  // NETSOL_LIVE_DELIVERY_PATH: the FIRE-ENTRY research family (research_v4_netsol_flow). Same contract as
+  // the line above — the engine's strategy exit monitor owns the exit, the trader applies no stop of its
+  // own, and the fine-grained spec travels in `exit_spec_id`. The entry MODE differs (the decision is the
+  // signal, not a crossing), but that is entirely an engine-side concern: to the trader this is one more
+  // stable label naming "engine settles this position".
+  "research_v4_netsol_flow_bracket",
 ]);
 
 // Hard risk note patterns that block paid trades regardless of other signals.
