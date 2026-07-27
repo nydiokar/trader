@@ -378,6 +378,8 @@ async function runClaimedExit(
     submittedVia: result.response.submitted_via,
     solReceived: result.response.sol_received,
     solReceivedUnresolved: result.response.sol_received_unresolved ?? null,
+    // FEE-SEPARATION-01: cost stored beside the price, never folded into it.
+    sellFeeLamports: result.response.sell_fee_lamports ?? null,
     closeReason: signal.trigger_reason,
     errorReason: null,
     errorMessage: null,
@@ -583,6 +585,10 @@ async function retryCloseOnly(
   const closeResult = await closePosition(signal.position_id, closeReason, {
     sell_signature: row.signature ?? undefined,
     sell_sol_received: row.solReceived ?? undefined,
+    // FEE-SEPARATION-01: forward the per-leg cost so the engine can score the strategy on
+    // GROSS and net-of-fee-at-real-size, not just on the test-size-contaminated net.
+    sell_fee_lamports: row.sellFeeLamports ?? undefined,
+    buy_fee_lamports: row.buyFeeLamports ?? undefined,
     sell_token_amount_raw: row.tokenAmountRaw ?? undefined,
     sell_submitted_via: row.submittedVia ?? undefined,
   });
@@ -595,6 +601,8 @@ async function retryCloseOnly(
     solReceived: row.solReceived,
     // carry the reason forward — this upsert must not silently blank it
     solReceivedUnresolved: row.solReceivedUnresolved ?? null,
+    buyFeeLamports: row.buyFeeLamports ?? null,
+    sellFeeLamports: row.sellFeeLamports ?? null,
     closeReason,
     closeCallbackStatus: closeResult.status,
     closeCallbackResponse: closeResult.body,
@@ -780,6 +788,8 @@ async function upsertExitRow(
     submittedVia?: string | null;
     solReceived?: number | null;
     solReceivedUnresolved?: string | null;
+    buyFeeLamports?: number | null;
+    sellFeeLamports?: number | null;
     closeReason?: string | null;
     closeCallbackStatus?: string | null;
     closeCallbackResponse?: string | null;
@@ -839,6 +849,8 @@ async function upsertExitRow(
       submittedVia: update.submittedVia,
       solReceived: update.solReceived,
       solReceivedUnresolved: update.solReceivedUnresolved,
+      buyFeeLamports: update.buyFeeLamports,
+      sellFeeLamports: update.sellFeeLamports,
       closeReason: update.closeReason,
       closeCallbackStatus: update.closeCallbackStatus,
       closeCallbackResponse: update.closeCallbackResponse,
@@ -1007,6 +1019,8 @@ async function closePosition(
   sellResult?: {
     sell_signature?: string;
     sell_sol_received?: number;
+    sell_fee_lamports?: number;
+    buy_fee_lamports?: number;
     sell_token_amount_raw?: string;
     sell_submitted_via?: string;
   },

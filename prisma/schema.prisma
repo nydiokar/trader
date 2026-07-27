@@ -172,6 +172,16 @@ model FlowExitExecution {
   // SOL-RECEIVED-BACKFILL-GAP-01: why solReceived is NULL on a row whose sell CONFIRMED.
   // NULL here + NULL solReceived on a closed row is the invariant violation the alarm hunts.
   solReceivedUnresolved String?   @map("sol_received_unresolved")
+  // FEE-SEPARATION-01: transaction fees for BOTH legs, in lamports, stored SEPARATELY so cost
+  // is never baked into the price series. `solReceived` stays fee-INCLUSIVE (the frozen basis,
+  // 367 rows of history depend on it); GROSS proceeds = solReceived + sellFeeLamports/1e9.
+  //
+  // Why this must be separate: at the 0.0001 SOL test size the round-trip fee is ~26% of the
+  // position, so EV on a fee-inclusive basis measures SIZE, not the strategy. Same book:
+  // 1.0885 gross vs 0.8259 net-of-fee at test size vs 1.0881 net-of-fee at 0.1 SOL. The edge
+  // is real; the test-size fee drag is what was hiding it.
+  buyFeeLamports        Int?      @map("buy_fee_lamports")
+  sellFeeLamports       Int?      @map("sell_fee_lamports")
   closeReason           String?   @map("close_reason")
   closeCallbackStatus   String?   @map("close_callback_status")
   closeCallbackResponse String?   @map("close_callback_response")

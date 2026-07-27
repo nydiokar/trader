@@ -161,3 +161,60 @@ describe("SOL-RECEIVED-BACKFILL-GAP-01 (b): non-positive proceeds are REAL, not 
     expect(result.solReceived).not.toBeCloseTo(0.000289918, 12);
   });
 });
+
+/**
+ * FEE-SEPARATION-01. `sol_received` stays fee-INCLUSIVE, but the fee is now surfaced
+ * SEPARATELY so GROSS proceeds are reconstructable. This matters because at the 0.0001 SOL
+ * test size the round-trip fee is ~28-39% of notional: an EV computed off the fee-inclusive
+ * net measures the TEST SIZE, not the strategy (same book: 1.110 gross vs 0.975 net at test
+ * size vs 1.109 net at 0.1 SOL).
+ */
+describe("FEE-SEPARATION-01: cost is reported beside the price, never folded into it", () => {
+  it("surfaces the sell fee without altering the fee-inclusive solReceived", async () => {
+    const getTransaction = vi
+      .fn()
+      .mockResolvedValue(txWithDelta(199_207_015, 199_389_321, 23_021));
+
+    const result = await reconcileSolReceivedFromSell(
+      chain(getTransaction as never),
+      SIG,
+      WALLET,
+      "d3d77594",
+      noSleep,
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("unreachable");
+    // basis unchanged
+    expect(result.solReceived).toBeCloseTo(0.000182306, 12);
+    // fee reported, NOT subtracted
+    expect(result.feeLamports).toBe(23_021);
+    // gross is reconstructable by the caller
+    const gross = result.solReceived + (result.feeLamports ?? 0) / 1e9;
+    expect(gross).toBeCloseTo(0.000205327, 12);
+  });
+
+  it("reports the fee even when the net is negative (fees exceeded proceeds)", async () => {
+    const getTransaction = vi
+      .fn()
+      .mockResolvedValue(txWithDelta(194_919_699, 194_915_058, 32_782));
+
+    const result = await reconcileSolReceivedFromSell(
+      chain(getTransaction as never),
+      SIG,
+      WALLET,
+      "96acabe9",
+      noSleep,
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("unreachable");
+    expect(result.solReceived).toBeCloseTo(-0.000004641, 12);
+    expect(result.feeLamports).toBe(32_782);
+    // The sell DID return SOL; the fee is what made the net negative. That distinction is
+    // the entire point of storing them apart.
+    const gross = result.solReceived + (result.feeLamports ?? 0) / 1e9;
+    expect(gross).toBeGreaterThan(0);
+    expect(gross).toBeCloseTo(0.000028141, 12);
+  });
+});

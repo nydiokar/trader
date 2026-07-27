@@ -279,6 +279,7 @@ export async function executeTokenSell(input: {
     submitted_via?: SubmissionPath;
     sol_received?: number;
     sol_received_unresolved?: string;
+    sell_fee_lamports?: number;
     dry_run?: boolean;
     error_kind?: string;
   };
@@ -305,6 +306,7 @@ export async function executeTokenSellWithDependencies(
     submitted_via?: SubmissionPath;
     sol_received?: number;
     sol_received_unresolved?: string;
+    sell_fee_lamports?: number;
     error_kind?: string;
   };
 }> {
@@ -374,7 +376,12 @@ export async function executeTokenSellWithDependencies(
           // SOL-RECEIVED-BACKFILL-GAP-01: exactly one of these is always set on a confirmed
           // sell, so a NULL sol_received downstream always carries a stated reason.
           ...(reconciliation.ok
-            ? { sol_received: reconciliation.solReceived }
+            ? {
+                sol_received: reconciliation.solReceived,
+                ...(reconciliation.feeLamports !== undefined
+                  ? { sell_fee_lamports: reconciliation.feeLamports }
+                  : {}),
+              }
             : { sol_received_unresolved: reconciliation.unresolvedReason }),
         },
       };
@@ -1401,7 +1408,7 @@ const SELL_RECONCILE_ATTEMPTS = 4;
 const SELL_RECONCILE_BACKOFF_MS = 900;
 
 export type SellReconciliation =
-  | { ok: true; solReceived: number }
+  | { ok: true; solReceived: number; feeLamports?: number }
   | { ok: false; unresolvedReason: string };
 
 /** @internal exported for SOL-RECEIVED-BACKFILL-GAP-01 regression coverage only. */
@@ -1475,7 +1482,12 @@ export async function reconcileSolReceivedFromSell(
       "sell reconciliation: fees met or exceeded proceeds — recording non-positive realized SOL",
     );
   }
-  return { ok: true, solReceived: Number(netLamports) / 1_000_000_000 };
+  // FEE-SEPARATION-01: surface the fee alongside the net so the caller can reconstruct GROSS
+  // proceeds. Not subtracted here — `solReceived` stays fee-inclusive (the frozen basis).
+  const feeRaw = transaction.meta?.fee;
+  const feeLamports = feeRaw === undefined ? undefined : Number(toLamportsBigInt(feeRaw) ?? 0n);
+
+  return { ok: true, solReceived: Number(netLamports) / 1_000_000_000, feeLamports };
 }
 
 function toLamportsBigInt(value: number | bigint): bigint | null {
