@@ -1,0 +1,18 @@
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    # Majors get their own individual PR (Dependabot's default) so they can't
+    # get lost in a batch merge — see tokens_ingest's
+    # .ai/knowledge/DEPENDENCY_MAJOR_BUMP_RISK_2026-08-02.md for which ones
+    # (@solana/kit is the live trade-execution path — read its migration notes
+    # line by line, don't just merge) need a manual read before merging. Only
+    # patch/minor get grouped into one low-risk PR.
+    groups:
+      patch-and-minor:
+        update-types:
+          - "patch"
+          - "minor"
