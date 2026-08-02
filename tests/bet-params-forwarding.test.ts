@@ -17,7 +17,7 @@
  *   5. absent context must not emit the key at all (byte-identical legacy body).
  */
 import { describe, expect, it } from "vitest";
-import { LegacySignalPayload } from "../src/webhook/schemas";
+import { LegacySignalPayload } from "../src/webhook/schemas.js";
 
 const BASE = {
   signal_id: "1a9ab2d3-5d42-4f90-8c57-5b67cd433217",
