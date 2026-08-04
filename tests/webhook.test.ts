@@ -448,7 +448,7 @@ describe("M1 webhook ingress", () => {
           signal_id: "11111111-1111-4111-8111-111111111111",
           token_mint: mint,
           amount_sol: 0.005,
-          max_slippage_bps: 300,
+          max_slippage_bps: 600, // runIntelligenceGate overrides with settings.maxSlippageBps (default 600)
         }),
         requestedAmountSol: 0.005,
         liveExecutionAllowed: false,
