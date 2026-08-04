@@ -32,7 +32,7 @@
     "@jup-ag/api": "^6.0.48",
     "@prisma/adapter-better-sqlite3": "^7.9.1",
     "@prisma/client": "^7.9.1",
-    "@solana/kit": "^6.8.0",
+    "@solana/kit": "^7.0.0",
     "@solana/spl-token": "^0.4.15",
     "bs58": "^5.0.0",
     "dotenv": "^17.4.2",
