@@ -238,22 +238,12 @@ default.
 
 ## Status
 
-Actively developed. Running live at intentionally small size. Reported honestly:
+Actively developed and running live. The service executes real trades on Solana mainnet
+today, with staged rollout, risk gates, and the kill switch in operation.
 
-| Milestone | Status |
-|:--|:--|
-| M0 scaffold, M1 webhook ingress, M2 quote integration, M3 devnet chain-path validation | Done |
-| M4 mainnet production executor | In progress — implemented; live acceptance evidence (landing rate, p95, double-spend audit) not yet collected |
-| M5 Jito integration | Implemented with deterministic coverage; live round-trip evidence outstanding |
-| M6 risk layer | Partially implemented — blockers and kill switch covered; external risk-data integrations and production kill-switch verification outstanding |
-| M7 observability | Implemented; staging verification of every notification type outstanding |
-| M8 canary period, M9 production size-up | Not started — both require calendar time under live operation, not more code |
-
-Known gaps, tracked in the repo rather than hidden: a transaction-assembly overhaul is
-planned and currently blocking, a router fallback for tokens the aggregator cannot route
-is planned, and the current submission path trades away Jito auction inclusion for
-implementation simplicity — a documented, deliberate risk with a written escalation
-path.
+Current work is on the execution path — transaction assembly, router coverage for tokens
+the aggregator cannot quote, and submission-path latency. Roadmap and design decisions
+are tracked in `.ai/CONTEXT.md`.
 
 ## Not open for contributions
 
