@@ -16,6 +16,30 @@ const TSX_LOADER_ARGS = [
   pathToFileURL(path.join(__dirname, "node_modules/tsx/dist/loader.mjs")).href,
 ].join(" ");
 
+// SECRET-LEAK FIX (2026-08-16). PM2 captures the FULL environment of whatever shell
+// started an app, and `pm2 save` writes that capture into ~/.pm2/dump.pm2 as
+// PLAINTEXT. This process had been started from a shell with secrets exported, so
+// the dump held SOLANA_PRIVATE_KEY and SOVA_API_KEY in the clear — neither of which
+// is declared in this file, and SOLANA_PRIVATE_KEY is not even read by this app
+// (src/config.ts wants WALLET_PRIVATE_KEY_BASE58). `pm2 resurrect` then replayed
+// those stale values on every boot. Audited across the whole dump, all 13 PM2 apps
+// on this box carried the same two keys.
+//
+// filter_env drops these prefixes at spawn so they never enter the snapshot.
+// Safe here because src/config.ts:1 does `import "dotenv/config"`, which loads .env
+// from cwd at startup — the app supplies its own secrets and never needed the
+// inherited copies. .env stays the single source of truth.
+//
+// NOTE: this only cleans the dump once the app is re-registered from this file
+// (`pm2 delete trader && pm2 start ecosystem.config.cjs && pm2 save`). Editing
+// dump.pm2 by hand is pointless: PM2 rewrites it from live daemon state on save.
+const SECRET_ENV_PREFIXES = [
+  "SOLANA_", "SOVA_", "WALLET_", "HELIUS_", "JUPITER_", "JITO_", "WEBHOOK_",
+  "TOKENS_INGEST_SERVICE_SECRET", "WORKER_", "MESH_", "CONTROLLER_", "DASHBOARD_",
+  "VAPID_", "CLAUDE_", "CLAUDECODE", "ANTHROPIC_", "OPENAI_", "TELEGRAM_",
+  "GITHUB_", "GH_", "AWS_", "VSCODE_", "WT_", "TERM_PROGRAM",
+];
+
 module.exports = {
   apps: [
     {
@@ -27,6 +51,7 @@ module.exports = {
       cwd: __dirname,
 
       // Environment
+      filter_env: SECRET_ENV_PREFIXES,
       env: {
         NODE_ENV: "production",
         LOG_FILE: "logs/bot.log",
