@@ -9,6 +9,7 @@
   "scripts": {
     "mainnet:wallet": "tsx src/solana/mainnet-wallet.ts",
     "canary:buy": "tsx src/solana/canary-buy.ts",
+    "tx:size-probe": "tsx scripts/txsize-probe.ts",
     "canary:sell": "tsx src/solana/canary-sell.ts",
     "live:settings": "tsx src/ops/live-settings.ts",
     "ops:control": "tsx src/ops/control.ts",
