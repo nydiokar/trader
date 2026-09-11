@@ -1,21 +1,15 @@
 import type { QuoteResponse } from "@jup-ag/api";
 import {
-  AccountRole,
   type Address,
-  address,
-  appendTransactionMessageInstructions,
   type Base64EncodedWireTransaction,
   type Blockhash,
-  decompileTransactionMessage,
-  decompileTransactionMessageFetchingLookupTables,
   getBase64EncodedWireTransaction,
-  getCompiledTransactionMessageDecoder,
   getSignatureFromTransaction,
   getTransactionDecoder,
+  partiallySignTransaction,
   type Signature,
-  setTransactionMessageFeePayerSigner,
-  setTransactionMessageLifetimeUsingBlockhash,
-  signTransactionMessageWithSigners,
+  type SignaturesMap,
+  type TransactionMessageBytes,
 } from "@solana/kit";
 import { config } from "../config.js";
 import { db } from "../db/index.js";
@@ -109,17 +103,16 @@ type SloQueryResult = {
 
 type SloQueryFn = (windowStartSeconds: number) => Promise<SloQueryResult>;
 
-type TipInstruction = {
-  tipAccount: Address;
-  tipLamports: bigint;
-};
-
 type BuildSwapTxFn = (
   base64Tx: string,
   wallet: Awaited<ReturnType<typeof getTradingSigner>>,
   connection: ChainClient,
-  tip?: TipInstruction,
-) => Promise<{ transaction: Awaited<ReturnType<typeof signTransactionMessageWithSigners>> }>;
+) => Promise<{
+  transaction: Readonly<{
+    messageBytes: TransactionMessageBytes;
+    signatures: SignaturesMap;
+  }>;
+}>;
 
 type ExecutorDependencies = {
   connection: ChainClient;
@@ -131,7 +124,6 @@ type ExecutorDependencies = {
   jitoClient?: JitoClient;
   submissionMode?: SubmissionMode;
   submissionFallbackRpc?: boolean;
-  heliusSenderTipLamports?: bigint;
   jitoTipLamports?: bigint;
   notify?: NotifyFn;
   querySloWindow?: SloQueryFn;
@@ -211,7 +203,7 @@ function defaultDependencies(): Promise<ExecutorDependencies> {
   const rpc = getSolanaRpc();
   return Promise.resolve({
     connection: createChainClient(rpc),
-    buildSwapTx: (base64Tx: string, wallet: Awaited<ReturnType<typeof getTradingSigner>>, connection: ChainClient, tip?: TipInstruction) => deserializeAndSign(base64Tx, wallet, connection, rpc, tip),
+    buildSwapTx: (base64Tx: string, wallet: Awaited<ReturnType<typeof getTradingSigner>>, connection: ChainClient) => deserializeAndSign(base64Tx, wallet, connection),
     quoteClient: {
       getQuote,
       getSwap,
@@ -227,7 +219,6 @@ function defaultDependencies(): Promise<ExecutorDependencies> {
     jitoClient: config.SUBMISSION_MODE === "jito" ? createJitoClient() : undefined,
     submissionMode: config.SUBMISSION_MODE,
     submissionFallbackRpc: config.SUBMISSION_FALLBACK_RPC,
-    heliusSenderTipLamports: BigInt(config.HELIUS_SENDER_TIP_LAMPORTS),
     jitoTipLamports: BigInt(config.JITO_TIP_LAMPORTS),
     notify,
     querySloWindow: defaultSloQuery,
@@ -331,7 +322,6 @@ export async function executeTokenSellWithDependencies(
       swapResponse.swapTransaction,
       deps.wallet,
       deps.connection,
-      resolveHeliusTip(deps),
     );
     signature = getSignatureFromTransaction(builtTransaction.transaction);
     const signedWireTransaction = getBase64EncodedWireTransaction(
@@ -502,7 +492,6 @@ export async function executeSignalWithDependencies(
       swapResponse.swapTransaction,
       deps.wallet,
       deps.connection,
-      resolveHeliusTip(deps),
     );
 
     signature = getSignatureFromTransaction(builtTransaction.transaction);
@@ -899,62 +888,39 @@ function createChainClient(rpc: ReturnType<typeof getSolanaRpc>): ChainClient {
   };
 }
 
-const SYSTEM_PROGRAM_ADDRESS = address("11111111111111111111111111111111");
-
 /** @internal exported for testing only */
 export async function deserializeAndSign(
   base64Tx: string,
   wallet: Awaited<ReturnType<typeof getTradingSigner>>,
   connection: ChainClient,
-  rpc: Parameters<typeof decompileTransactionMessageFetchingLookupTables>[1],
-  tip?: TipInstruction,
 ): Promise<{
-  transaction: Awaited<ReturnType<typeof signTransactionMessageWithSigners>>;
+  transaction: Readonly<{
+    messageBytes: TransactionMessageBytes;
+    signatures: SignaturesMap;
+  }>;
 }> {
   const rawBytes = new Uint8Array(Buffer.from(base64Tx, "base64"));
-
   const decodedTx = getTransactionDecoder().decode(rawBytes);
-  const compiledMessage = getCompiledTransactionMessageDecoder().decode(decodedTx.messageBytes);
-  const hasAlts = ((compiledMessage as unknown as { addressTableLookups?: unknown[] }).addressTableLookups?.length ?? 0) > 0;
-  const txMessage = hasAlts
-    ? await decompileTransactionMessageFetchingLookupTables(compiledMessage, rpc)
-    : decompileTransactionMessage(compiledMessage, { addressesByLookupTableAddress: {} });
 
-  const latestBlockhash = await connection.getLatestBlockhash("confirmed");
-  const withFeePayer = setTransactionMessageFeePayerSigner(wallet, txMessage);
-  const withBlockhash = setTransactionMessageLifetimeUsingBlockhash(
-    { blockhash: latestBlockhash.blockhash, lastValidBlockHeight: BigInt(latestBlockhash.lastValidBlockHeight) },
-    withFeePayer,
-  );
-
-  const updatedMessage = tip
-    ? appendTransactionMessageInstructions(
-        [{
-          programAddress: SYSTEM_PROGRAM_ADDRESS,
-          accounts: [
-            { address: address(wallet.address), role: AccountRole.WRITABLE_SIGNER },
-            { address: tip.tipAccount, role: AccountRole.WRITABLE },
-          ],
-          data: (() => {
-            const d = new Uint8Array(12);
-            const v = new DataView(d.buffer);
-            v.setUint32(0, 2, true);
-            v.setBigUint64(4, tip.tipLamports, true);
-            return d;
-          })(),
-        }],
-        withBlockhash,
-      )
-    : withBlockhash;
-
-  const transaction = await signTransactionMessageWithSigners(updatedMessage);
+  // Sign Jupiter's message bytes VERBATIM. Do not decompile/recompile.
+  //
+  // `decompileTransactionMessage` returns a `version: "legacy"` message and drops all
+  // address-table-lookup data; `compileTransactionMessage` rebuilds the account list from
+  // feePayer+instructions only and has no ALT re-compression path. So any decompile →
+  // re-sign round trip silently expands every ALT-compressed address back to a full 32
+  // bytes, inflating a size-compliant Jupiter v0 tx past the 1232-byte wire limit on
+  // multi-hop routes. That is what produced `tx_too_large` at 1261 bytes.
+  //
+  // Jupiter's /swap tx already has our wallet as fee payer and a fresh blockhash; the
+  // caller uses `swapResponse.lastValidBlockHeight` for expiry. Nothing needs rebuilding.
+  const transaction = await partiallySignTransaction([wallet.keyPair], decodedTx);
 
   const signedBase64 = getBase64EncodedWireTransaction(transaction);
   const signedBytes = Buffer.from(signedBase64, "base64");
   if (signedBytes.length > TX_SIZE_LIMIT_BYTES) {
     throw new JupiterApiError(
       "tx_too_large",
-      `tx_too_large: signed transaction is ${signedBytes.length} bytes (limit ${TX_SIZE_LIMIT_BYTES})`,
+      `tx_too_large: signed transaction is ${signedBytes.length} bytes (limit ${TX_SIZE_LIMIT_BYTES}) — Jupiter returned an oversized route`,
     );
   }
 
@@ -1080,15 +1046,6 @@ async function submitBuiltTransaction(input: {
 
   await submitViaRpc(input);
   return "rpc";
-}
-
-function resolveHeliusTip(deps: ExecutorDependencies): TipInstruction | undefined {
-  if (resolveSubmissionMode(deps) !== "helius_sender") return undefined;
-  if (!deps.heliusSenderClient) return undefined;
-  return {
-    tipAccount: deps.heliusSenderClient.getTipAccount(),
-    tipLamports: deps.heliusSenderTipLamports ?? BigInt(config.HELIUS_SENDER_TIP_LAMPORTS),
-  };
 }
 
 function resolveSubmissionMode(deps: ExecutorDependencies): SubmissionMode {

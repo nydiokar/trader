@@ -1,6 +1,10 @@
 # Trader Bot - Project Context
 
-**Branch:** `main` | **Last Updated:** 2026-05-19 | **Status:** M0-M3 complete. M4-M5 core executor implemented with deterministic coverage; M6 implemented; M7 Telegram fully wired; Flow-to-bot dry-run bridge complete through Stage 8; full buy→registry→exit→sell loop live as of 2026-05-18; sell reconciliation and event-driven exit push live as of 2026-05-19.
+**Branch:** `main` | **Last Updated:** 2026-07-27 | **Status:** M0-M3 complete. M4-M5 core executor implemented with deterministic coverage; M6 implemented; M7 Telegram fully wired; Flow-to-bot dry-run bridge complete through Stage 8; full buy→registry→exit→sell loop live as of 2026-05-18; sell reconciliation and event-driven exit push live as of 2026-05-19.
+
+**✅ RESOLVED 2026-09-11: operator flipped deployed `SUBMISSION_MODE` to `helius_sender`.** That flip exposed a latent tx-inflation bug (`tx_too_large`, 1261 bytes) now fixed — see the shift note at the top of `## Active Work`. The historical note below is kept for context only; **do not read it as current deployed state.**
+
+**⚠️ HISTORICAL (found 2026-07-27, since fixed): deployed `SUBMISSION_MODE=rpc`, not `helius_sender`.** Bot has been submitting every live trade via bare RPC (no SWQoS, no Jito) for at least the last 25 days, confirmed via `submitted_via` telemetry (287/287 exits, 371/371 buys = 100% `rpc`). This contradicts the "current" language in the Submission Architecture section below, which describes the intended design, not the deployed config — that doc drift caused a wrong answer to be given to the operator. Fix before M8 canary: set `SUBMISSION_MODE=helius_sender` in the deployed `.env`, restart, re-verify `submitted_via` in fresh telemetry.
 
 ---
 
@@ -35,12 +39,57 @@ Canonical spec: `solana-signal-bot-spec-v2.md`
 | M6 | Risk layer | 1 day | **Partially implemented** | Every blocker has a test; kill switch verified in prod |
 | M7 | Observability | 0.5 day | **Implemented** | All lifecycle Telegram events wired; |
 | M-TX | Executor TX Overhaul | 2 days | **Planned — blocking** | No `pre_submit_failed` from tx size; `/swap`-based build; canary confirms on previously-failing pump token |
-| M8 | Canary period | 1 week calendar | **Not started** | 5-7 days live with tiny caps, no UNCERTAIN states, >= 95% landing |
+| M8 | Canary period | 1 week calendar | **Not started — BLOCKED** | 5-7 days live with tiny caps, no UNCERTAIN states, >= 95% landing. **Blocked on: deployed `SUBMISSION_MODE` is `rpc`, not `helius_sender` — fix before starting canary clock (see Submission Architecture section).** |
 | M9 | Production size-up | Ongoing | **Not started** | One full week at target size with SLOs met |
 
 ---
 
 ## Active Work
+
+### Shift note — 2026-09-11: `tx_too_large` root-caused and fixed
+
+**What just happened.** Live signal `63e515c8` on `3tE3UVG2EroLXzNpfQJrQioRY8TPgtLaqf97kWwcpump` failed
+`tx_too_large` at 1261 bytes. Root-caused and fixed in `deserializeAndSign`
+(`src/executor/index.ts:892`). Typecheck + build clean; 128 passed / 2 skipped.
+
+**Root cause (verified in installed lib source, NOT inferred).** `deserializeAndSign` was
+decompiling Jupiter's `/swap` tx and recompiling it before signing. In
+`@solana/transaction-messages@6.8.0`:
+- `decompileTransactionMessage` ends with `createTransactionMessage({ version: "legacy" })` —
+  it drops ALL address-table-lookup data and inlines every ALT address as a full 32 bytes.
+- `compileTransactionMessage` builds its account map from `feePayer` + `instructions` only.
+  There is **no ALT re-compression path in this version at all**.
+
+So every trade silently shipped a legacy-inflated tx, never Jupiter's compact v0. This was
+latent from the day M-TX shipped — the overhaul fixed the quote source (`/swap-instructions`
+→ `/swap`) but reintroduced the identical failure one layer down.
+
+**Why it surfaced only now.** `resolveHeliusTip` returned `undefined` under
+`SUBMISSION_MODE=rpc`, so no instruction was appended and the inflated tx still fit. Flipping
+to `helius_sender` appended a tip instruction adding a new 32-byte tip account + ~46 bytes,
+pushing this multi-hop pump route to 1261. **The submission-mode flip exposed the bug; it did
+not cause it.**
+
+**Fix.** Sign Jupiter's `messageBytes` verbatim via `partiallySignTransaction([wallet.keyPair],
+decodedTx)`. No decompile, no recompile, no blockhash overwrite (Jupiter's lifetime is
+authoritative; callers already use `swapResponse.lastValidBlockHeight` for expiry). Signed size
+now equals Jupiter's own output exactly.
+
+**Removed as dead/unreachable:** `resolveHeliusTip`, `TipInstruction`, `heliusSenderTipLamports`
+dep field, `SYSTEM_PROGRAM_ADDRESS` in `index.ts`, and `createHeliusSenderTipTransaction` in
+`helius-sender.ts` (never called; per I9 a separate tip tx is rejected by Sender with HTTP 500).
+Also drops a per-buy ALT RPC fetch from the hot path.
+
+**Watch out for.** The old tests could never catch this — every fixture was a zero-instruction,
+zero-ALT tx. The two new ALT regression tests in `tests/deserialize-and-sign.test.ts` were
+verified to FAIL against the old decompile behavior before being kept. ALT lookup codec fields
+are `writableIndexes` / `readonlyIndexes` (not `...Indices`) — wrong names fail deep inside the
+codec with an opaque `Cannot read properties of undefined (reading 'length')`.
+
+**Still open.** Tip is no longer baked into the swap tx, so Helius Sender relies on
+`?swqos_only=true` + `computeUnitPriceMicroLamports` for priority, exactly as invariant I9
+specifies. No live buy has confirmed on this code path yet — next live signal is the proof.
+
 
 ### Flow-to-Bot Integration
 
@@ -258,10 +307,10 @@ M4 task scaffold: `.ai/milestones/M4.md`
 - **I3.** The processor/executor must be entered at most once per `signal_id`.
 - **I4.** Terminal outcomes must write back to DB.
 - **I5.** Private key material must stay redacted in logs.
-- **I6.** Use Jupiter `/swap` with explicit `computeUnitPriceMicroLamports`. `/swap-instructions` + manual assembly produces transactions that exceed the 1232-byte limit on real routes. Reversed 2026-05-19. See `M-executor-tx-overhaul.md`.
+- **I6.** Use Jupiter `/swap` with explicit `computeUnitPriceMicroLamports`, and sign the returned transaction's `messageBytes` **verbatim**. Never decompile/recompile it. kit 6.x `decompileTransactionMessage` returns a legacy message and discards address-table lookups, and `compileTransactionMessage` has no ALT re-compression path — any round trip inlines every ALT address at 32 bytes and blows the 1232-byte limit on multi-hop routes. Corollary: **no instruction can ever be appended to a Jupiter `/swap` tx.** Reversed 2026-05-19, tightened 2026-09-11.
 - **I7.** After Jito acceptance, RPC fallback is forbidden.
 - **I8.** UNCERTAIN tx state is a human-intervention path, not an auto-retry path.
-- **I9.** Helius Sender tip is NOT a separate transaction. Jupiter `/swap` returns a pre-built tx we cannot inject instructions into. Tip instruction cannot be baked in. We use `?swqos_only=true` (SWQoS staked routing, no Jito auction) and rely on `computeUnitPriceMicroLamports` for on-chain priority. Trade-off: no Jito MEV auction inclusion via Helius Sender. Escalation path if landing degrades: switch to `/swap-instructions` + baked tip + Jito bundle. See submission ladder below.
+- **I9.** There is NO Helius Sender tip — not baked in, not a separate transaction. Jupiter `/swap` returns a pre-built tx we cannot inject instructions into (see I6), and a standalone tip tx is rejected by Helius Sender with HTTP 500. Code enforcing this was removed 2026-09-11 (`resolveHeliusTip`, `createHeliusSenderTipTransaction`); an earlier attempt to append the tip anyway is exactly what produced the 1261-byte `tx_too_large`. We use `?swqos_only=true` (SWQoS staked routing, no Jito auction) and rely on `computeUnitPriceMicroLamports` for on-chain priority. Trade-off: no Jito MEV auction inclusion via Helius Sender. Escalation path if landing degrades: switch to `/swap-instructions` + baked tip + Jito bundle. See submission ladder below.
 
 ---
 
@@ -284,6 +333,11 @@ M4 task scaffold: `.ai/milestones/M4.md`
 
 ## Submission Architecture & Escalation Ladder
 
+**⚠️ VERIFIED DEPLOYED REALITY (2026-07-27) — READ THIS BEFORE TRUSTING THE LADDER BELOW:**
+`SUBMISSION_MODE` defaults to `"rpc"` in `src/config.ts:46` and is NOT overridden to `helius_sender` in the running process. Confirmed against live telemetry: **100% of `submitted_via` values in `trades` and `flow_exit_execution` over the last 25 days are `rpc`** (287/287 exits, 371/371 confirmed buys as of 2026-07-27). There is zero Helius Sender or Jito traffic in production right now, despite this section previously describing Helius Sender as the "current/primary" path. That description was aspirational/design intent, never verified against the actual runtime config — do not repeat that mistake. **This means the bot has been trading live, unattended, with NO SWQoS staked routing and NO Jito MEV protection for at least 25 days** — every trade is a plain RPC broadcast with only priority-fee compute pricing (if even that is confirmed — verify `PRIORITY_FEE_LEVEL` in the real `.env` before assuming it's `High`, not just the code default).
+
+**BLOCKING before any scale-up (M8/M9):** flip `SUBMISSION_MODE=helius_sender` (or `jito`) in the deployed `.env`, restart the process, and re-verify `submitted_via` in fresh telemetry before increasing trade size or cap. Do not trust this doc's "current" language for submission mode again without a live DB query — cross-check `.env`/`submitted_via` telemetry, not just this file or `config.ts` defaults, every time.
+
 Current implementation is deliberately simple. When landing rate degrades or requirements change, escalate in order:
 
 **Quote source** (swap independently of send path):
@@ -297,23 +351,25 @@ Current implementation is deliberately simple. When landing rate degrades or req
 - Fully manual — direct DEX SDK, custom route; maximum control, maximum complexity
 
 **Send path** (ordered by implementation cost and landing probability under contention):
-1. **Primary (current):** Jupiter `/swap` + `computeUnitPriceMicroLamports` → Helius Sender `?swqos_only=true` (staked SWQoS routing, no Jito auction)
-2. **Fallback (current):** rebroadcast same signed tx via standard RPC every 2s until block height expires
+0. **ACTUALLY DEPLOYED (verified 2026-07-27 via `submitted_via` telemetry, 100% of last 25 days):** `SUBMISSION_MODE=rpc` — plain standard RPC broadcast. No SWQoS, no Jito, no Sender tip. This is NOT step 1 below; it is what's really running.
+1. **Designed primary, code-supported, NOT currently active:** Jupiter `/swap` + `computeUnitPriceMicroLamports` → Helius Sender `?swqos_only=true` (staked SWQoS routing, no Jito auction). Requires `SUBMISSION_MODE=helius_sender` in the deployed `.env` — not set.
+2. **Fallback (current, and also what step 0 permanently runs on):** rebroadcast same signed tx via standard RPC every 2s until block height expires
 3. **Escalation:** `/swap-instructions` + baked Jito tip instruction → Jito bundle (full MEV auction; solves landing under contention; re-introduces tx size risk)
 4. **Race mode:** fire primary + escalation simultaneously, take whichever confirms first
 5. **Multi-broadcast:** send same tx to Helius default (dual SWQoS+Jito), regional Helius HTTP endpoints, QuickNode, bloXroute, Nozomi, Triton in parallel
 6. **Non-Jupiter fallback:** Raydium/Orca/Meteora/PumpSwap direct SDKs for tokens Jupiter can't route; PumpFun AMM for ungraduated bonding-curve tokens
 
 **When to escalate:**
+- **Immediate, before any scale-up:** flip `SUBMISSION_MODE` from `rpc` to `helius_sender` in the deployed `.env` and restart — this is not an escalation, it's closing a gap between documented and actual config.
 - Landing rate < 90% over 1h window → SLO alert fires → consider escalation 3
 - Repeated `expired` outcomes during high network congestion → escalation 3 or 4
 - `no_route` from Jupiter on ungraduated token → escalation 6 (PumpFun AMM — planned, see M-pumpfun-router)
 - Helius Sender consistently 500ing → already falls back to RPC (escalation 2); long-term fix is escalation 3
 
-**Known gaps in current path (I9):**
-- No Jito MEV auction = lower block inclusion priority vs full-Jito bots during congestion
-- SWQoS routing is best-effort; no auction guarantee
-- These gaps are acceptable at current trade size; revisit at production scale-up (M9)
+**Known gaps in current path:**
+- **Bare RPC (actually deployed):** no priority routing of any kind beyond whatever `PRIORITY_FEE_LEVEL` compute pricing does — no SWQoS, no Jito auction, worst-case landing priority under contention. Unverified whether this was ever intentionally set, or silently defaulted and never caught. Treat as a live risk, not an accepted trade-off, until an operator confirms intent.
+- **Helius Sender path (I9, not currently active):** even if enabled, no Jito MEV auction = lower block inclusion priority vs full-Jito bots during congestion; SWQoS routing is best-effort, no auction guarantee.
+- These gaps are NOT acceptable to carry into M8/M9 scale-up — resolve the `rpc`-vs-`helius_sender` mismatch first.
 
 ---
 
